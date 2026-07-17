@@ -15,8 +15,22 @@ let package: Package = .init(
     products: [
         .library(name: "LabControllerKit", targets: ["LabControllerKit"]),
     ],
+    dependencies: [
+        .package(url: "https://github.com/UnpxreTW/SwiftStyleKit.git", exact: "2.1.0"),
+    ],
     targets: [
-        .target(name: "LabControllerKit"),
-        .testTarget(name: "LabControllerKitTests", dependencies: ["LabControllerKit"]),
+        .target(
+            name: "LabControllerKit",
+            plugins: [
+                .plugin(name: "SwiftStyleLint", package: "SwiftStyleKit"),
+            ]
+        ),
+        .testTarget(
+            name: "LabControllerKitTests",
+            dependencies: ["LabControllerKit"],
+            plugins: [
+                .plugin(name: "SwiftStyleLint", package: "SwiftStyleKit"),
+            ]
+        ),
     ]
 )
