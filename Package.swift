@@ -17,5 +17,6 @@ let package: Package = .init(
     ],
     targets: [
         .target(name: "LabControllerKit"),
+        .testTarget(name: "LabControllerKitTests", dependencies: ["LabControllerKit"]),
     ]
 )
