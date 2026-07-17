@@ -10,23 +10,15 @@ import Dispatch
 import Foundation
 import LabControllerKit
 import Synchronization
-import Yams
 
-/// 從 argv 掃出 `--config <path>` 的路徑值；未提供旗標或缺後續值時回 nil。
-func configPath(from arguments: [String]) -> String? {
-    guard let flagIndex: Int = arguments.firstIndex(of: "--config") else { return nil }
-    let valueIndex: Int = arguments.index(after: flagIndex)
-    guard valueIndex < arguments.endIndex else { return nil }
-    return arguments[valueIndex]
-}
-
+// 所有參數皆於啟動時由 CLI 引數注入；不讀任何設定檔。
 let arguments: [String] = Array(CommandLine.arguments.dropFirst())
 let configuration: Config
-if let path: String = configPath(from: arguments) {
-    let yamlData: Data = try Data(contentsOf: URL(fileURLWithPath: path))
-    configuration = try YAMLDecoder().decode(Config.self, from: yamlData)
-} else {
-    configuration = .default
+do {
+    configuration = try parseLaunchArguments(arguments)
+} catch {
+    FileHandle.standardError.write(Data("\(error)\n".utf8))
+    exit(1)
 }
 
 print("lab-controller: config apiVersion=\(configuration.apiVersion) intervalSeconds=\(configuration.poll.intervalSeconds)")
