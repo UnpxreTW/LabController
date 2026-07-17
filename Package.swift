@@ -14,9 +14,11 @@ let package: Package = .init(
     platforms: [.macOS(.v15)],
     products: [
         .library(name: "LabControllerKit", targets: ["LabControllerKit"]),
+        .executable(name: "lab-controller", targets: ["lab-controller"]),
     ],
     dependencies: [
         .package(url: "https://github.com/UnpxreTW/SwiftStyleKit.git", exact: "2.1.0"),
+        .package(url: "https://github.com/jpsim/Yams.git", exact: "6.2.2"),
     ],
     targets: [
         .target(
@@ -25,9 +27,22 @@ let package: Package = .init(
                 .plugin(name: "SwiftStyleLint", package: "SwiftStyleKit"),
             ]
         ),
+        .executableTarget(
+            name: "lab-controller",
+            dependencies: [
+                "LabControllerKit",
+                .product(name: "Yams", package: "Yams"),
+            ],
+            plugins: [
+                .plugin(name: "SwiftStyleLint", package: "SwiftStyleKit"),
+            ]
+        ),
         .testTarget(
             name: "LabControllerKitTests",
-            dependencies: ["LabControllerKit"],
+            dependencies: [
+                "LabControllerKit",
+                .product(name: "Yams", package: "Yams"),
+            ],
             plugins: [
                 .plugin(name: "SwiftStyleLint", package: "SwiftStyleKit"),
             ]
