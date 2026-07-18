@@ -6,13 +6,13 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-/// lab-controller 的執行組態；對應 YAML 設定檔，缺欄一律回落預設值。
+/// lab-controller 的執行組態；所有欄位皆於行程啟動時由 CLI 引數注入，缺欄一律回落預設值。
 public struct Config: Codable, Sendable {
 
     /// 輪詢相關設定的巢狀容器。
     public struct Poll: Codable, Sendable {
 
-        /// 兩次輪詢之間的間隔秒數；YAML 缺欄時回落 60。
+        /// 兩次輪詢之間的間隔秒數；缺欄時回落 60。
         public var intervalSeconds: Int
 
         /// 以顯式間隔建立；預設 60 秒。
@@ -46,6 +46,6 @@ public struct Config: Codable, Sendable {
         self.poll = try container.decodeIfPresent(Poll.self, forKey: .poll) ?? .init()
     }
 
-    /// 無設定檔時採用的預設組態。
+    /// 無 CLI 引數覆寫時採用的預設組態。
     public static let `default`: Config = .init()
 }
