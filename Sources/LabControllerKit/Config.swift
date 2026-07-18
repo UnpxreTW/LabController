@@ -28,21 +28,21 @@ public struct Config: Codable, Sendable {
     }
 
     /// GitLab API 版本標記；本片不含連線欄，僅保留版本字串。預設 "v4"。
-    public var apiVersion: String
+    public var version: String
 
     /// 輪詢設定；預設週期 60 秒。
     public var poll: Poll
 
     /// 以顯式欄位建立；各欄帶預設值，等同 `.default`。
-    public init(apiVersion: String = "v4", poll: Poll = .init()) {
-        self.apiVersion = apiVersion
+    public init(version: String = "v4", poll: Poll = .init()) {
+        self.version = version
         self.poll = poll
     }
 
-    /// 解碼缺欄時逐欄回落預設（`apiVersion` → "v4"、`poll` → 預設）。
+    /// 解碼缺欄時逐欄回落預設（`version` → "v4"、`poll` → 預設）。
     public init(from decoder: any Decoder) throws {
         let container: KeyedDecodingContainer<CodingKeys> = try decoder.container(keyedBy: CodingKeys.self)
-        self.apiVersion = try container.decodeIfPresent(String.self, forKey: .apiVersion) ?? "v4"
+        self.version = try container.decodeIfPresent(String.self, forKey: .version) ?? "v4"
         self.poll = try container.decodeIfPresent(Poll.self, forKey: .poll) ?? .init()
     }
 
