@@ -31,19 +31,19 @@ public enum LaunchArgumentError: Error, CustomStringConvertible, Equatable {
 }
 
 /// 從啟動引數解析出 `Config`；所有參數皆於行程啟動時注入、不讀任何設定檔。
-/// 未給 `--api-version`／`--poll-interval` 時採用 `Config` 的預設值，遇未知旗標、
+/// 未給 `--version`／`--poll-interval` 時採用 `Config` 的預設值，遇未知旗標、
 /// 缺值或格式不合法即拋錯，交由呼叫端決定如何回報並結束行程。
 public func parseLaunchArguments(_ arguments: [String]) throws -> Config {
-    var apiVersion: String = Config.default.apiVersion
+    var version: String = Config.default.version
     var intervalSeconds: Int = Config.default.poll.intervalSeconds
     var index: Int = arguments.startIndex
     while index < arguments.endIndex {
         let argument: String = arguments[index]
         switch argument {
-        case "--api-version":
+        case "--version":
             let valueIndex: Int = arguments.index(after: index)
             guard valueIndex < arguments.endIndex else { throw LaunchArgumentError.missingValue(argument) }
-            apiVersion = arguments[valueIndex]
+            version = arguments[valueIndex]
             index = arguments.index(after: valueIndex)
         case "--poll-interval":
             let valueIndex: Int = arguments.index(after: index)
@@ -58,5 +58,5 @@ public func parseLaunchArguments(_ arguments: [String]) throws -> Config {
             throw LaunchArgumentError.unknownArgument(argument)
         }
     }
-    return Config(apiVersion: apiVersion, poll: .init(intervalSeconds: intervalSeconds))
+    return Config(version: version, poll: .init(intervalSeconds: intervalSeconds))
 }
