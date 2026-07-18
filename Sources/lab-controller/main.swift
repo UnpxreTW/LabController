@@ -21,7 +21,7 @@ do {
     exit(1)
 }
 
-print("lab-controller: config apiVersion=\(configuration.apiVersion) intervalSeconds=\(configuration.poll.intervalSeconds)")
+print("lab-controller: config version=\(configuration.version) intervalSeconds=\(configuration.poll.intervalSeconds)")
 
 // 停止旗標：訊號處理器設為 true，心跳迴圈據此結束。
 let stopRequested: Atomic<Bool> = .init(false)
