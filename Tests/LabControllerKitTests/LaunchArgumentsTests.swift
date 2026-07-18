@@ -11,27 +11,27 @@ import Testing
 
 private final class LaunchArgumentsTests {
 
-    /// 未給任何引數時，回落 `Config` 文件化的預設值（apiVersion "v4"、輪詢間隔 60）。
+    /// 未給任何引數時，回落 `Config` 文件化的預設值（version "v4"、輪詢間隔 60）。
     @Test
     func `no arguments falls back to documented defaults`() throws {
         let config: Config = try parseLaunchArguments([])
-        #expect(config.apiVersion == "v4")
+        #expect(config.version == "v4")
         #expect(config.poll.intervalSeconds == 60)
     }
 
-    /// 給定 `--api-version`／`--poll-interval` 時，兩欄皆採用引數值。
+    /// 給定 `--version`／`--poll-interval` 時，兩欄皆採用引數值。
     @Test
     func `given flags override both fields`() throws {
-        let config: Config = try parseLaunchArguments(["--api-version", "v3", "--poll-interval", "15"])
-        #expect(config.apiVersion == "v3")
+        let config: Config = try parseLaunchArguments(["--version", "v3", "--poll-interval", "15"])
+        #expect(config.version == "v3")
         #expect(config.poll.intervalSeconds == 15)
     }
 
     /// 只給其中一個旗標時，另一欄仍回落預設值。
     @Test
     func `single flag overrides only that field`() throws {
-        let config: Config = try parseLaunchArguments(["--api-version", "v2"])
-        #expect(config.apiVersion == "v2")
+        let config: Config = try parseLaunchArguments(["--version", "v2"])
+        #expect(config.version == "v2")
         #expect(config.poll.intervalSeconds == 60)
     }
 
