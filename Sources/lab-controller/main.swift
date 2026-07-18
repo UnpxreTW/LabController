@@ -6,20 +6,16 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
+import ArgumentParser
 import Dispatch
 import Foundation
 import LabControllerKit
 import Synchronization
 
-// 所有參數皆於啟動時由 CLI 引數注入；不讀任何設定檔。
-let arguments: [String] = Array(CommandLine.arguments.dropFirst())
-let configuration: Config
-do {
-    configuration = try parseLaunchArguments(arguments)
-} catch {
-    FileHandle.standardError.write(Data("\(error)\n".utf8))
-    exit(1)
-}
+// 所有參數皆於啟動時由 CLI 引數注入；不讀任何設定檔。未知旗標、缺值或格式不合法由
+// ArgumentParser 直接印出用法說明並以非零狀態結束行程。
+let command: LabControllerCommand = LabControllerCommand.parseOrExit()
+let configuration: Config = command.resolvedConfig
 
 print("lab-controller: config version=\(configuration.version) intervalSeconds=\(configuration.poll.intervalSeconds)")
 
