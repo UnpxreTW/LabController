@@ -14,20 +14,38 @@ let package: Package = .init(
     platforms: [.macOS(.v15)],
     products: [
         .library(name: "LabControllerKit", targets: ["LabControllerKit"]),
+        .executable(name: "lab-controller", targets: ["lab-controller"]),
     ],
     dependencies: [
         .package(url: "https://github.com/UnpxreTW/SwiftStyleKit.git", exact: "2.1.0"),
+        .package(url: "https://github.com/apple/swift-argument-parser.git", exact: "1.8.2"),
     ],
     targets: [
         .target(
             name: "LabControllerKit",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
+            plugins: [
+                .plugin(name: "SwiftStyleLint", package: "SwiftStyleKit"),
+            ]
+        ),
+        .executableTarget(
+            name: "lab-controller",
+            dependencies: [
+                "LabControllerKit",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
             plugins: [
                 .plugin(name: "SwiftStyleLint", package: "SwiftStyleKit"),
             ]
         ),
         .testTarget(
             name: "LabControllerKitTests",
-            dependencies: ["LabControllerKit"],
+            dependencies: [
+                "LabControllerKit",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
             plugins: [
                 .plugin(name: "SwiftStyleLint", package: "SwiftStyleKit"),
             ]
