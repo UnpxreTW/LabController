@@ -15,7 +15,10 @@ import ArgumentParser
 /// 行程生命週期（心跳／訊號處理）留在可執行檔目標，本型別維持純解析、全部可測。
 public struct LabControllerCommand: ParsableCommand {
 
-    public static let configuration: CommandConfiguration = .init(commandName: "lab-controller")
+    public static let configuration: CommandConfiguration = .init(
+        commandName: "lab-controller",
+        subcommands: [RegisterCommand.self]
+    )
 
     /// GitLab API 版本；未給時回落 `Config.default.version`。
     @Option(help: "GitLab API version to target.")
