@@ -14,7 +14,52 @@ import Synchronization
 
 // 所有參數皆於啟動時由 CLI 引數注入；不讀任何設定檔。未知旗標、缺值或格式不合法由
 // ArgumentParser 直接印出用法說明並以非零狀態結束行程。
-let command: LabControllerCommand = LabControllerCommand.parseOrExit()
+let parsedCommand: any ParsableCommand
+do {
+    parsedCommand = try LabControllerCommand.parseAsRoot()
+} catch {
+    LabControllerCommand.exit(withError: error)
+}
+
+// `register` 子命令：一次性動作、完成即結束行程，不進心跳迴圈。
+if let register: RegisterCommand = parsedCommand as? RegisterCommand {
+    let client: RunnerRegistrationClient = .init()
+    let runner: RegisteredRunner
+    do {
+        runner = try await client.register(
+            host: register.host,
+            registrationToken: register.registrationToken,
+            description: register.description
+        )
+    } catch {
+        FileHandle.standardError.write(Data("lab-controller: register failed: \(error)\n".utf8))
+        exit(1)
+    }
+    // 認證 token 僅於註冊回應揭露一次（one-shot reveal）；先印出再驗證，
+    // 驗證失敗才不會讓 token 隨行程結束流失、留下拿不回 token 的孤兒 runner。
+    print("lab-controller: registered runner id=\(runner.id)")
+    print("lab-controller: authentication token follows on the next line")
+    print(runner.token)
+    do {
+        try await client.verify(host: register.host, token: runner.token)
+    } catch {
+        FileHandle.standardError.write(Data("lab-controller: token verification failed: \(error)\n".utf8))
+        exit(1)
+    }
+    print("lab-controller: token verified")
+    exit(0)
+}
+
+// 其他內建子命令（如 `help`、`--help` 解析出的 HelpCommand）：交回 ArgumentParser 執行後結束行程。
+guard let command: LabControllerCommand = parsedCommand as? LabControllerCommand else {
+    do {
+        var builtin: any ParsableCommand = parsedCommand
+        try builtin.run()
+        exit(0)
+    } catch {
+        LabControllerCommand.exit(withError: error)
+    }
+}
 let configuration: Config = command.resolvedConfig
 
 print("lab-controller: config version=\(configuration.version) intervalSeconds=\(configuration.poll.intervalSeconds)")
