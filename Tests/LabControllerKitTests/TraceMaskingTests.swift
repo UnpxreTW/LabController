@@ -189,6 +189,8 @@ private final class MaskedTraceStreamTests {
             emitted += stream.append("synthetic-secret")
         }
         #expect(!emitted.isEmpty, "緩衝區卡住＝trace 完全停送")
+        // 只驗「有輸出」不夠：上限訂成十倍大它照樣有輸出、只是慢。要驗的是緩衝區真的有界。
+        #expect(stream.bufferedCharacterCount <= 4 * 16 + 16)
         emitted += stream.flush()
         // 內容全是秘密，因此輸出只能由遮蔽字樣組成——一個原始字元都不許漏。
         #expect(emitted.replacingOccurrences(of: "[MASKED]", with: "").isEmpty)

@@ -32,6 +32,10 @@ public struct TraceMasker: Sendable, Equatable {
     ///
     /// **丟棄不可以是靜默的**：「有東西被標成要遮、但我們沒遮」這件事本身必須看得見，
     /// 否則設定寫錯時沒有人會發現。這裡只記數量、不記內容。
+    ///
+    /// ⚠️ **計數範圍＝建立時餵進來的全部值**。走 `init(variables:jobToken:)` 時含 job token，
+    /// 因此與 `UnsupportedJobFeature.unmaskedShortValues` 的數字**刻意不同**——後者只數變數，
+    /// 因為那則警告是說給設定變數的人聽的。要對帳請確認兩邊用的是同一個 init。
     public let droppedPhraseCount: Int
 
     /// 片語數量；供呼叫端做健全性檢查，不洩漏內容。

@@ -161,6 +161,10 @@ public struct JobResponse: Decodable, Sendable, Equatable,
         if self.dependencies.contains(where: \.hasUnreadableArtifactsFilename) {
             unreadable.append("dependencies[].artifacts_file.filename")
         }
+        // 有 git_info 卻缺 repo_url／sha：clone 做不到，但要在收件時就說，不是留到執行階段炸。
+        if self.gitInfo?.hasIncompleteCoordinates == true {
+            unreadable.append("git_info.repo_url/sha")
+        }
         self.unreadableFields = unreadable
     }
 

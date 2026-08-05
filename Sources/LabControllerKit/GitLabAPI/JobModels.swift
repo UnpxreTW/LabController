@@ -106,6 +106,15 @@ public struct GitInfo: Decodable, Sendable, Equatable {
         self.sha = try container.decodeIfPresent(String.self, forKey: .sha) ?? ""
     }
 
+    /// 站台送了 `git_info`、但少了取碼所需的座標。
+    ///
+    /// 與寬鬆解碼分工：解碼刻意不拋（少一個鍵就丟掉整個 job 更糟），但「缺了什麼」必須有
+    /// 人接手。缺 `repo_url` 或 `sha` 時 clone 根本做不到，留到執行階段才炸，錯誤訊息會跟
+    /// 「站台沒給座標」完全連不起來。由 `JobResponse.unreadableFields` 承接、收件時擋下。
+    public var hasIncompleteCoordinates: Bool {
+        repoURL.isEmpty || sha.isEmpty
+    }
+
     /// 對應站台端欄位名（snake_case）。
     private enum CodingKeys: String, CodingKey {
         case repoURL = "repo_url"
@@ -148,13 +157,25 @@ extension GitInfo: CustomStringConvertible, CustomDebugStringConvertible, Custom
     ///
     /// authority 內沒有 `@` 就沒有 userinfo，原樣回傳。
     private static func withoutUserInfo(_ url: String) -> String {
-        let afterScheme: String.Index = url.range(of: "://")?.upperBound ?? url.startIndex
+        let afterScheme: String.Index = schemeEnd(of: url) ?? url.startIndex
         let rest: Substring = url[afterScheme...]
         let authorityEnd: String.Index = rest.firstIndex { $0 == "/" || $0 == "?" || $0 == "#" }
             ?? rest.endIndex
         let authority: Substring = rest[..<authorityEnd]
         guard let at: String.Index = authority.lastIndex(of: "@") else { return url }
         return url[..<afterScheme] + "***@" + url[url.index(after: at)...]
+    }
+
+    /// 找出開頭那個 `scheme://` 的結束位置；開頭不是合法 scheme 就回 nil。
+    ///
+    /// 不能用「字串裡第一個 `://`」：未經 URL 編碼的密碼裡可以有 `://`，命中它會讓切點落
+    /// 在憑證中間，後續的 authority 切法跟著全錯、最後把整串原樣印出去。scheme 依 RFC 3986
+    /// 必須以字母開頭、其後只允許字母／數字／`+`／`-`／`.`。
+    private static func schemeEnd(of url: String) -> String.Index? {
+        let scheme: Substring = url.prefix { $0.isLetter || $0.isNumber || $0 == "+" || $0 == "-" || $0 == "." }
+        guard let first: Character = scheme.first, first.isLetter else { return nil }
+        guard url[scheme.endIndex...].hasPrefix("://") else { return nil }
+        return url.index(scheme.endIndex, offsetBy: 3)
     }
 }
 

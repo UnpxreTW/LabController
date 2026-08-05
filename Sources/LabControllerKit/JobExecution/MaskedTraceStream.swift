@@ -17,6 +17,17 @@
 /// 前綴」這個形狀上：短的那個在前半段就被完整命中並換成遮蔽字樣，原文當場銷毀，長的那個
 /// 之後永遠再也匹配不到，於是它多出來的那一截跨段之後原樣送上站台。改存原文之後，切點
 /// 另外要避開任何命中區間的內部——切在區間中間等同把一個還沒完成的比對截斷。
+/// ## 接線這支之前必須知道的三件事（語域是 `Character`、trace 是 bytes）
+///
+/// 1. **輸入必須是完整 grapheme 邊界的合法 UTF-8**。子行程 pipe 的一次 `read()` 很可能切在
+///    多 byte 字元中間，直接 `String(data:encoding:)` 會回 nil 或補上替代字元；請在呼叫端
+///    先把不完整的尾段留著、湊齊再餵進來。
+/// 2. **byte 位移要用「放行後」的長度累加**。`[MASKED]` 是 8 個 byte，被換掉的可能是 40 個；
+///    拿原始輸入長度去推 `Content-Range` 會與站台的位移永久錯開，之後每一段都吃 416。請用
+///    `append` 回傳值的 `utf8.count` 累加。
+/// 3. **比對走 `Character`（grapheme cluster）**。片語若以 `\r` 結尾而 trace 是 `\r\n`，那兩個
+///    碼位在 Swift 是**單一** `Character`、不等於 `\r`，該片語整段對不上。站台對遮蔽變數的字元
+///    集限制讓這個形狀實務上出不來，但 `TraceMasker(maskedValues:)` 是 public、擋不住手動建立。
 public struct MaskedTraceStream: Sendable {
 
     /// 套用的遮蔽規則。
@@ -41,6 +52,11 @@ public struct MaskedTraceStream: Sendable {
     /// 那個形狀下的每輪重掃就越貴。四倍足夠讓區間有空間跨過切點，又把成本壓在同一個數量級。
     private var bufferLimit: Int {
         max(4 * masker.longestPhraseLength, 64)
+    }
+
+    /// 目前押在緩衝區的字元數；供測試驗「緩衝區確實有上界」。
+    var bufferedCharacterCount: Int {
+        pending.count
     }
 
     /// 以遮蔽規則建立。

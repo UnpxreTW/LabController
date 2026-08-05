@@ -145,6 +145,24 @@ private final class JobPayloadDecodingTests {
         #expect(try decodeJob(#"{"id":1,"token":"t","image":{"name":""}}"#).imageName == "")
     }
 
+    /// 有 `git_info` 卻缺 `repo_url`：clone 做不到，必須在收件時就說，不是留到執行階段炸。
+    @Test
+    func `incomplete git coordinates are recorded`() throws {
+        let job: JobResponse = try decodeJob(#"{"id":1,"token":"t","git_info":{"ref":"main","sha":"abc"}}"#)
+        #expect(job.gitInfo?.hasIncompleteCoordinates == true)
+        #expect(job.unreadableFields == ["git_info.repo_url/sha"])
+    }
+
+    /// 座標齊全時不得誤報。
+    @Test
+    func `complete git coordinates are not flagged`() throws {
+        let job: JobResponse = try decodeJob(#"""
+        {"id":1,"token":"t","git_info":{"repo_url":"https://example.invalid/g/a.git","ref":"main","sha":"abc"}}
+        """#)
+        #expect(job.gitInfo?.hasIncompleteCoordinates == false)
+        #expect(job.unreadableFields.isEmpty)
+    }
+
     /// `image` 形狀讀不懂時只記 unreadable，不另外編一個名字出來誤導 trace。
     @Test
     func `unreadable image shape reports only the field`() throws {

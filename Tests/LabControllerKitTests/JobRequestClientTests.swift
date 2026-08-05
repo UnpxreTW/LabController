@@ -170,7 +170,19 @@ private final class JobRequestClientTests {
             .init(statusCode: 201, body: .init("not json".utf8))
         ])
         let client: JobRequestClient = .init(transport: transport)
-        await #expect(throws: GitLabAPIError.undecodableBody) {
+        await #expect(throws: GitLabAPIError.undecodableBody(codingPath: "")) {
+            _ = try await client.requestJob(host: "https://h.invalid", token: "t")
+        }
+    }
+
+    /// 缺必要欄位時要說出是哪一個——「body 解不開」單獨一句話查不動。
+    @Test
+    func `undecodable body carries the failing key`() async throws {
+        let transport: ScriptedTransport = .init([
+            .init(statusCode: 201, body: .init(#"{"token":"synthetic-job-token"}"#.utf8))
+        ])
+        let client: JobRequestClient = .init(transport: transport)
+        await #expect(throws: GitLabAPIError.undecodableBody(codingPath: "id")) {
             _ = try await client.requestJob(host: "https://h.invalid", token: "t")
         }
     }
