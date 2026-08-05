@@ -49,41 +49,6 @@ public struct JobVariable: Decodable, Sendable, Equatable {
     }
 }
 
-/// job 的一個執行步驟；本片只保留形狀，實際執行由後續切片承接。
-public struct JobStep: Decodable, Sendable, Equatable {
-
-    /// 步驟名稱，例如 `script`、`after_script`。
-    public let name: String
-
-    /// 該步驟要跑的指令列。
-    public let script: [String]
-
-    /// 失敗是否可容忍。
-    public let allowFailure: Bool
-
-    /// 以顯式欄位建立（測試用）。
-    public init(name: String, script: [String], allowFailure: Bool = false) {
-        self.name = name
-        self.script = script
-        self.allowFailure = allowFailure
-    }
-
-    /// 解碼；`script` 缺席視為空、`allow_failure` 缺席視為 false。
-    public init(from decoder: any Decoder) throws {
-        let container: KeyedDecodingContainer<CodingKeys> = try decoder.container(keyedBy: CodingKeys.self)
-        self.name = try container.decode(String.self, forKey: .name)
-        self.script = try container.decodeIfPresent([String].self, forKey: .script) ?? []
-        self.allowFailure = try container.decodeIfPresent(Bool.self, forKey: .allowFailure) ?? false
-    }
-
-    /// 對應站台端欄位名（snake_case）。
-    private enum CodingKeys: String, CodingKey {
-        case name
-        case script
-        case allowFailure = "allow_failure"
-    }
-}
-
 /// job 對應的 git 座標；供後續切片在執行沙箱內取出正確的程式碼版本。
 public struct GitInfo: Decodable, Sendable, Equatable {
 
@@ -119,63 +84,6 @@ public struct GitInfo: Decodable, Sendable, Equatable {
         case repoURL = "repo_url"
         case ref
         case sha
-    }
-}
-
-/// `POST /api/v4/jobs/request` 回 201 時的 job 內容。
-///
-/// 刻意寬鬆解碼：站台端還會回 `artifacts`／`cache`／`services`／`job_info` 等欄位，
-/// 本片不實作對應行為、解碼時一律忽略（未知欄位不致失敗）。欄位形狀待對凍齡站台
-/// 實測後錄成 fixture 校準。
-public struct JobResponse: Decodable, Sendable, Equatable {
-
-    /// job 識別碼；trace 回寫與狀態回報都用它組路徑。
-    public let id: Int
-
-    /// 此 job 專屬的短命 token；trace／狀態回報用它認證，與 runner 認證 token 不同。
-    public let token: String
-
-    /// job 環境變數。
-    public let variables: [JobVariable]
-
-    /// job 執行步驟。
-    public let steps: [JobStep]
-
-    /// git 座標；站台端未提供時為 nil。
-    public let gitInfo: GitInfo?
-
-    /// 以顯式欄位建立（測試用）。
-    public init(
-        id: Int,
-        token: String,
-        variables: [JobVariable] = [],
-        steps: [JobStep] = [],
-        gitInfo: GitInfo? = nil
-    ) {
-        self.id = id
-        self.token = token
-        self.variables = variables
-        self.steps = steps
-        self.gitInfo = gitInfo
-    }
-
-    /// 解碼；集合類欄位缺席一律視為空，不因此判定回應無效。
-    public init(from decoder: any Decoder) throws {
-        let container: KeyedDecodingContainer<CodingKeys> = try decoder.container(keyedBy: CodingKeys.self)
-        self.id = try container.decode(Int.self, forKey: .id)
-        self.token = try container.decode(String.self, forKey: .token)
-        self.variables = try container.decodeIfPresent([JobVariable].self, forKey: .variables) ?? []
-        self.steps = try container.decodeIfPresent([JobStep].self, forKey: .steps) ?? []
-        self.gitInfo = try container.decodeIfPresent(GitInfo.self, forKey: .gitInfo)
-    }
-
-    /// 對應站台端欄位名（snake_case）。
-    private enum CodingKeys: String, CodingKey {
-        case id
-        case token
-        case variables
-        case steps
-        case gitInfo = "git_info"
     }
 }
 
