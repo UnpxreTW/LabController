@@ -290,6 +290,27 @@ private final class SecretRedactionTests {
         }
     }
 
+    /// userinfo 抹除的四個容易寫錯的形狀。
+    @Test
+    func `user info stripping handles the awkward shapes`() {
+        let cases: [(String, String)] = [
+            // 沒有 scheme（scp 式寫法）也要抹掉。
+            ("gitlab-ci-token:TOKENVALUE@host/g/a.git", "***@host/g/a.git"),
+            // 密碼含未編碼的 `@`：取最後一個，否則尾段會留下來。
+            ("https://user:TOK@ENVALUE@host/g/a.git", "https://***@host/g/a.git"),
+            // `@` 在 path 裡是正常的，不得動到。
+            ("https://host/group/repo@v1.git", "https://host/group/repo@v1.git"),
+            // 沒有 userinfo 就原樣回。
+            ("https://host:8443/g/a.git", "https://host:8443/g/a.git"),
+        ]
+        for (input, expected) in cases {
+            let info: GitInfo = .init(repoURL: input, ref: "main", sha: "abc")
+            #expect("\(info)".contains(expected), "輸入 \(input) 的抹除結果不符")
+            #expect(!"\(info)".contains("TOKENVALUE"))
+            #expect(!"\(info)".contains("ENVALUE"))
+        }
+    }
+
     /// `JobResponse` 印出來不得帶 token 或變數值。
     @Test
     func `job response never prints its token`() {

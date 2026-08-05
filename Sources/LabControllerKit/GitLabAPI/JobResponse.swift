@@ -43,11 +43,15 @@ public struct JobResponse: Decodable, Sendable, Equatable,
     /// 站台對本次執行的指示（目前只有逾時）；未提供時為 nil。
     public let runnerInfo: JobRunnerInfo?
 
-    /// CI 檔指定的 container image 名稱；**未指定時才為 nil**。
+    /// CI 檔指定的 container image 名稱。
     ///
     /// 判準是「CI 檔有沒有要求 image」而不是「名字寫了沒」：payload 送了 `image` 物件卻
     /// 沒帶 `name`（或帶空字串）時，這裡回空字串而非 nil——回 nil 會讓收件判定當成沒宣告，
     /// 於是一個要求容器的 job 被當普通 job 跑完回綠。
+    ///
+    /// **nil 有兩種意思**：欄位缺席／為 null（真的沒宣告），或該欄位形狀讀不懂——後者
+    /// **必定同時出現在 `unreadableFields`**。因此「`imageName == nil` ⇒ 沒要求容器」
+    /// 這個推論只有在 `unreadableFields` 為空時才成立。
     public let imageName: String?
 
     /// CI 檔宣告的 service 數量。
@@ -153,6 +157,10 @@ public struct JobResponse: Decodable, Sendable, Equatable,
         if self.steps.contains(where: { $0.unrecognisedRunCondition != nil }) {
             unreadable.append("steps[].when")
         }
+        // 站台說某個上游有產物、我們卻讀不出檔名：形狀跟預期不一樣，不可以就這樣算了。
+        if self.dependencies.contains(where: \.hasUnreadableArtifactsFilename) {
+            unreadable.append("dependencies[].artifacts_file.filename")
+        }
         self.unreadableFields = unreadable
     }
 
@@ -207,8 +215,9 @@ public struct JobResponse: Decodable, Sendable, Equatable,
 
     /// 取出 `image.name`；job 未指定 image 時站台把該欄位送成 null。
     ///
-    /// **有 `image` 物件就一定回非 nil**：名稱缺席、為空或型別不符時回空字串，讓收件判定
-    /// 仍看得到「這個 job 要求了容器」。回 nil 只代表整個欄位缺席或為 null。
+    /// **`image` 物件讀得懂就一定回非 nil**：名稱缺席或為空時回空字串，讓收件判定仍看得到
+    /// 「這個 job 要求了容器」。回 nil 代表欄位缺席／為 null，或形狀讀不懂（後者同時記進
+    /// `unreadable`）。
     private static func imageName(
         in container: KeyedDecodingContainer<CodingKeys>,
         into unreadable: inout [String]

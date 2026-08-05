@@ -31,6 +31,9 @@ public enum UnsupportedJobFeature: Sendable, Equatable {
     /// payload 有這個欄位，但形狀不是本片認得的（協議已漂移）。
     case unreadablePayloadField(name: String)
 
+    /// 有變數標了 masked、但值短到不列入遮蔽片語。
+    case unmaskedShortValues(count: Int)
+
     /// 這項缺口該讓 job 紅、還是只警告。
     public enum Severity: Sendable, Equatable {
 
@@ -48,9 +51,11 @@ public enum UnsupportedJobFeature: Sendable, Equatable {
     ///
     /// 讀不懂的欄位同樣是紅：形狀既然不認得，就無從判斷它宣告了什麼——降級執行等於拿
     /// 「我沒看懂」當「它沒要求」用。
+    /// 短到不遮的 masked 值是警告：擋下整個 job 幫不了任何人（那個長度的字串本來也遮不出
+    /// 意義），但**必須說出來**，否則設定寫錯時沒有人會發現自己以為遮了、其實沒遮。
     public var severity: Severity {
         switch self {
-        case .cache:
+        case .cache, .unmaskedShortValues:
             return .warning
         case .image, .services, .artifacts, .dependencyArtifacts, .unreadablePayloadField:
             return .fatal
@@ -74,6 +79,8 @@ public enum UnsupportedJobFeature: Sendable, Equatable {
         case let .dependencyArtifacts(jobNames):
             let names: String = jobNames.joined(separator: "、")
             return "executor 尚未實作產物下載：上游 job（\(names)）帶有本 job 依賴的產物。"
+        case let .unmaskedShortValues(count):
+            return "有 \(count) 個標為 masked 的變數短於遮蔽下限、本次未遮；請改用夠長的值，否則它會原樣出現在 log。"
         case let .cache(count):
             return "executor 尚未實作 cache：CI 檔宣告的 \(count) 項快取本次略過，僅影響速度、不影響結果。"
         case let .unreadablePayloadField(name):

@@ -113,6 +113,12 @@ public enum JobAdmission: Sendable, Equatable {
         // 讀不懂的欄位排最前面：底下每一條判定都建立在「payload 形狀如預期」之上，
         // 這個前提一旦不成立，其餘結論全都不可信。
         features.append(contentsOf: job.unreadableFields.map(UnsupportedJobFeature.unreadablePayloadField(name:)))
+        // 防呆：`unreadableFields` 由解碼器填，但這個型別也造得出來（fixture、replay 工具）。
+        // 擋門建在做決定的這一關才擋得住所有來源，不是只擋走解碼那一條。
+        if !job.unreadableFields.contains("steps[].when"),
+           job.steps.contains(where: { $0.unrecognisedRunCondition != nil }) {
+            features.append(.unreadablePayloadField(name: "steps[].when"))
+        }
         // 判準是「CI 檔有沒有要求 image」而非「名字寫了沒」——送了 image 物件卻沒帶名字，
         // 要求仍然成立，當沒看到就會讓一個要容器的 job 在裸環境跑完回綠。
         if let imageName: String = job.imageName {
@@ -125,12 +131,21 @@ public enum JobAdmission: Sendable, Equatable {
             features.append(.artifacts(count: job.artifactCount))
         }
         // 判準是「這個上游真的存了產物」而不是「有沒有上游」——站台送的是全部上游。
-        let carrying: [String] = job.dependencies.filter(\.carriesArtifacts).map(\.name)
+        // 名字讀不出來就退回識別碼：印成「上游 job（）」的話，讀 log 的人查不到是哪一個。
+        let carrying: [String] = job.dependencies
+            .filter(\.carriesArtifacts)
+            .map { $0.name.isEmpty ? "#\($0.identifier)" : $0.name }
         if !carrying.isEmpty {
             features.append(.dependencyArtifacts(jobNames: carrying))
         }
         if job.cacheCount > 0 {
             features.append(.cache(count: job.cacheCount))
+        }
+        // 只數變數、不含 job token：這則警告是說給設定變數的人聽的，而 token 是站台發的，
+        // 對方既改不動也不該為它收到一則看不懂的訊息。
+        let dropped: Int = TraceMasker(variables: job.variables).droppedPhraseCount
+        if dropped > 0 {
+            features.append(.unmaskedShortValues(count: dropped))
         }
         return features
     }

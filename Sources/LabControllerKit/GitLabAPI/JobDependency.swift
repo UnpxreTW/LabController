@@ -41,10 +41,21 @@ public struct JobDependency: Decodable, Sendable, Equatable {
 
     /// 這個相依是否真的帶著要下載的產物。
     ///
-    /// 空檔名視同沒有產物：站台端有產物才給這個物件，但檔名為空的話也無從下載。
+    /// **判準是「這個物件在不在」，不是「檔名寫了沒」**：站台只在該上游真的有產物時才送
+    /// 這一段，物件出現就等於站台說了「這裡有東西要下載」。拿檔名是否為空來降級，等於在
+    /// 站台說有、我們讀不到名字的情況下自己決定「那就當作沒有」——job 照跑回綠、產物一次
+    /// 都沒下載，正是本模組整套拒收機制要防的那種假綠。檔名為空屬形狀異常，由
+    /// `JobResponse.unreadableFields` 另行記錄。
     public var carriesArtifacts: Bool {
+        artifactsFile != nil
+    }
+
+    /// 站台說有產物、但檔名讀不出來。
+    ///
+    /// 與 `carriesArtifacts` 分開：前者決定收不收，這個只回報「形狀跟預期不一樣」。
+    public var hasUnreadableArtifactsFilename: Bool {
         guard let artifactsFile else { return false }
-        return !artifactsFile.filename.isEmpty
+        return artifactsFile.filename.isEmpty
     }
 
     /// 對應站台端欄位名（snake_case）。

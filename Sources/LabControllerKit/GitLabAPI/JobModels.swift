@@ -138,13 +138,23 @@ extension GitInfo: CustomStringConvertible, CustomDebugStringConvertible, Custom
 
     /// 把 `scheme://user:secret@host/...` 的 userinfo 段換掉。
     ///
-    /// 只認 `://` 與其後第一個 `@`——不解析整個 URL，是因為這裡的責任只有「別把憑證印出來」，
-    /// 而一個解析不了的網址更該保守處理，不是原樣放行。
+    /// 三個容易寫錯的地方，都刻意處理過：
+    /// - **scheme 可以沒有**（`user:token@host/path` 是合法的 scp 式寫法）——只認
+    ///   `://` 的話這種形狀會原樣印出憑證。
+    /// - **只看 authority 段**（到第一個 `/`／`?`／`#` 為止）——`@` 出現在 path 裡是
+    ///   正常的（`repo@v1.git`），照砍會把路徑吃掉。
+    /// - **取 authority 內最後一個 `@`**——密碼未經 URL 編碼而含 `@` 時，取第一個會讓
+    ///   密碼的後半截留在輸出裡。
+    ///
+    /// authority 內沒有 `@` 就沒有 userinfo，原樣回傳。
     private static func withoutUserInfo(_ url: String) -> String {
-        guard let schemeEnd: Range<String.Index> = url.range(of: "://") else { return url }
-        let rest: Substring = url[schemeEnd.upperBound...]
-        guard let at: String.Index = rest.firstIndex(of: "@") else { return url }
-        return url[..<schemeEnd.upperBound] + "***@" + rest[rest.index(after: at)...]
+        let afterScheme: String.Index = url.range(of: "://")?.upperBound ?? url.startIndex
+        let rest: Substring = url[afterScheme...]
+        let authorityEnd: String.Index = rest.firstIndex { $0 == "/" || $0 == "?" || $0 == "#" }
+            ?? rest.endIndex
+        let authority: Substring = rest[..<authorityEnd]
+        guard let at: String.Index = authority.lastIndex(of: "@") else { return url }
+        return url[..<afterScheme] + "***@" + url[url.index(after: at)...]
     }
 }
 

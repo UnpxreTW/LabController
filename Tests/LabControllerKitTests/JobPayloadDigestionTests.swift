@@ -108,13 +108,16 @@ private final class JobPayloadDecodingTests {
         #expect(job.dependencies.last?.artifactsFile?.filename == "artifacts.zip")
     }
 
-    /// 空檔名視同沒有產物。
+    /// 空檔名**仍算有產物**：站台只在真的有產物時才送這個物件，讀不出檔名是我們的問題，
+    /// 不能拿來當「那就沒有吧」的理由——那條路的終點是 job 回綠但產物沒下載。
     @Test
-    func `empty artifact filename does not count as artifacts`() throws {
+    func `empty artifact filename still counts as artifacts`() throws {
         let job: JobResponse = try decodeJob(#"""
         {"id":1,"token":"t","dependencies":[{"id":9,"name":"x","artifacts_file":{"filename":"","size":0}}]}
         """#)
-        #expect(job.dependencies.first?.carriesArtifacts == false)
+        #expect(job.dependencies.first?.carriesArtifacts == true)
+        #expect(job.dependencies.first?.hasUnreadableArtifactsFilename == true)
+        #expect(job.unreadableFields == ["dependencies[].artifacts_file.filename"])
     }
 
     /// 能力欄位形狀變了不得讓整包解不出來——那會讓已指派的 job 靜靜消失。
@@ -167,6 +170,38 @@ private final class JobPayloadDecodingTests {
         }
         #expect(plan.masker.phraseCount == 2)
         #expect(plan.masker.droppedPhraseCount == 1)
+        // 只記在 masker 裡等於沒人看得到——要落到 trace 上才算「說出來了」。
+        #expect(plan.warnings == [.unmaskedShortValues(count: 1)])
+    }
+
+    /// 上游名字讀不出來時退回識別碼，別讓 trace 印成「上游 job（）」。
+    @Test
+    func `dependency without a name falls back to its identifier`() {
+        let job: JobResponse = .init(
+            id: 1,
+            token: "synthetic-job-token",
+            dependencies: [.init(identifier: 42, name: "", artifactsFile: .init(filename: "out.zip", size: 8))]
+        )
+        guard case let .rejected(rejection) = JobAdmission.review(job) else {
+            Issue.record("預期 rejected")
+            return
+        }
+        #expect(rejection.features == [.dependencyArtifacts(jobNames: ["#42"])])
+    }
+
+    /// 擋門要建在做決定的那一關：直接造出帶殘值的 step 也必須被擋下。
+    @Test
+    func `unrecognised run condition blocks admission even without the decoder`() {
+        let job: JobResponse = .init(
+            id: 1,
+            token: "synthetic-job-token",
+            steps: [.init(name: "script", script: ["x"], unrecognisedRunCondition: "on_moon_phase")]
+        )
+        guard case let .rejected(rejection) = JobAdmission.review(job) else {
+            Issue.record("預期 rejected")
+            return
+        }
+        #expect(rejection.features == [.unreadablePayloadField(name: "steps[].when")])
     }
 }
 
