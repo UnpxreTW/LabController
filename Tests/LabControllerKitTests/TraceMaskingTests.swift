@@ -56,6 +56,23 @@ private final class TraceMaskerTests {
     func `no phrases leaves text untouched`() {
         #expect(TraceMasker(maskedValues: []).mask("nothing to hide") == "nothing to hide")
     }
+
+    /// 兩個片語在文字裡首尾重疊時整段遮掉，不得留下後者沒被前者蓋到的那一截。
+    ///
+    /// 逐片語依序取代會先把 `alpha-shared` 換掉，於是 `shared-omega` 剩下的 `-omega`
+    /// 原樣留在 trace 上——那三個字元屬於一個被標為 masked 的值。
+    @Test
+    func `overlapping phrases are masked as one region`() {
+        let masker: TraceMasker = .init(maskedValues: ["alpha-shared", "shared-omega"])
+        #expect(masker.mask("value=alpha-shared-omega") == "value=[MASKED]")
+    }
+
+    /// 只有真正屬於片語的字元被遮，前後文原樣保留。
+    @Test
+    func `masking does not swallow surrounding text`() {
+        let masker: TraceMasker = .init(maskedValues: ["mid"])
+        #expect(masker.mask("a mid b mid c") == "a [MASKED] b [MASKED] c")
+    }
 }
 
 /// 串流遮蔽：跨段邊界的行為。

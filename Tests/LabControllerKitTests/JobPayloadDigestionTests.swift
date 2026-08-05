@@ -102,6 +102,31 @@ private final class JobPayloadDecodingTests {
         """#)
         #expect(job.dependencies.first?.carriesArtifacts == false)
     }
+
+    /// 能力欄位形狀變了不得讓整包解不出來——那會讓已指派的 job 靜靜消失。
+    @Test
+    func `unexpected capability shape is recorded instead of throwing`() throws {
+        let job: JobResponse = try decodeJob(#"{"id":7,"token":"t","cache":{"key":"k"}}"#)
+        #expect(job.id == 7)
+        #expect(job.unreadableFields == ["cache"])
+        #expect(job.cacheCount == 0)
+    }
+
+    /// 任何一個非 id／token 欄位形狀變了都走同一條路，不是只有能力欄位有保護。
+    @Test
+    func `unexpected shape on other fields is also recorded`() throws {
+        let job: JobResponse = try decodeJob(#"{"id":7,"token":"t","steps":"make","runner_info":42}"#)
+        #expect(job.steps.isEmpty)
+        #expect(job.runnerInfo == nil)
+        #expect(job.unreadableFields == ["steps", "runner_info"])
+    }
+
+    /// 送了 image 物件卻沒帶名字時仍算「宣告了 image」，不得因為名字是空的就當沒看到。
+    @Test
+    func `image object without a name still counts as declared`() throws {
+        #expect(try decodeJob(#"{"id":1,"token":"t","image":{}}"#).imageName == "")
+        #expect(try decodeJob(#"{"id":1,"token":"t","image":{"name":""}}"#).imageName == "")
+    }
 }
 
 /// 收件判定（`JobAdmission`）的行為。
@@ -213,6 +238,30 @@ private final class JobAdmissionTests {
         #expect(UnsupportedJobFeature.cache(count: 3).severity == .warning)
     }
 
+    /// 讀不懂的欄位一律擋下，並在訊息裡指名是哪個欄位。
+    @Test
+    func `unreadable payload field blocks admission`() {
+        let job: JobResponse = .init(id: 1, token: "t", unreadableFields: ["cache"])
+        guard case let .rejected(rejection) = JobAdmission.review(job) else {
+            Issue.record("預期 rejected：形狀讀不懂就無從判斷它宣告了什麼")
+            return
+        }
+        #expect(rejection.features == [.unreadablePayloadField(name: "cache")])
+        #expect(rejection.traceMessage.contains("cache"))
+        #expect(UnsupportedJobFeature.unreadablePayloadField(name: "cache").severity == .fatal)
+    }
+
+    /// image 物件沒帶名字時照樣拒收——「名字是空的」不等於「沒要求容器」。
+    @Test
+    func `image declared without a name is still rejected`() {
+        let job: JobResponse = .init(id: 1, token: "t", imageName: "")
+        guard case let .rejected(rejection) = JobAdmission.review(job) else {
+            Issue.record("預期 rejected")
+            return
+        }
+        #expect(rejection.features == [.image(name: "")])
+    }
+
     /// 多項缺口一次全列出來，不是報第一個就停。
     @Test
     func `every blocking feature is reported`() {
@@ -267,6 +316,28 @@ private final class JobTimeoutPolicyTests {
             return
         }
         #expect(plan.timeoutSeconds == 900)
+    }
+
+    /// 步驟宣告的逾時也要夾——只夾 job 級那一個，執行端照步驟值跑就繞過了硬上限。
+    @Test
+    func `step timeouts are clamped to the job budget`() {
+        let job: JobResponse = .init(
+            id: 1,
+            token: "t",
+            steps: [
+                .init(name: "script", script: ["make"], timeoutSeconds: 10_800),
+                .init(name: "after_script", script: ["cleanup"], timeoutSeconds: 300),
+                .init(name: "unset", script: ["x"])
+            ],
+            runnerInfo: .init(timeoutSeconds: 10_800)
+        )
+        guard case let .accepted(plan) = JobAdmission.review(job, timeoutPolicy: .init(hardLimitSeconds: 900)) else {
+            Issue.record("預期 accepted")
+            return
+        }
+        #expect(plan.timeoutSeconds == 900)
+        // 超過預算的夾成預算、原本就在預算內的不動、未宣告（0）維持 0 讓執行端回落 job 預算。
+        #expect(plan.steps.map(\.timeoutSeconds) == [900, 300, 0])
     }
 }
 

@@ -21,8 +21,10 @@ public struct JobStep: Decodable, Sendable, Equatable {
     /// 站台為此步驟宣告的逾時秒數；0 代表未宣告。
     ///
     /// 16.2 給每個步驟的都是**同一個** `metadata_timeout`（＝job 級逾時），不是各步驟
-    /// 的獨立預算；照著它逐步驟各給一份，整個 job 就能跑到宣告值的好幾倍。夾上限時
-    /// 與 job 逾時同源看待。
+    /// 的獨立預算；照著它逐步驟各給一份，整個 job 就能跑到宣告值的好幾倍。
+    ///
+    /// ⚠️ 本型別直接解自 payload、**這個值是站台原樣宣告、未經任何夾制**。要拿來當執行
+    /// 上限用的是 `JobPlan.steps` 裡那一份（已由 `JobAdmission` 夾進 job 預算）。
     public let timeoutSeconds: Int
 
     /// 此步驟在什麼結果下才跑；對應協議欄位 `when`。

@@ -20,6 +20,10 @@ public struct JobPlan: Sendable, Equatable {
     public let git: GitInfo?
 
     /// 依 payload 原順序排列的步驟；是否該跑逐一問 `JobStepWhen`。
+    ///
+    /// 每個步驟的 `timeoutSeconds` 已夾在 `timeoutSeconds`（job 預算）之內，`0` 仍代表
+    /// 站台未宣告、執行端回落 job 預算。**這裡不會出現大於 job 預算的步驟逾時**——照著
+    /// 步驟值跑就不會突破本機硬上限。
     public let steps: [JobStep]
 
     /// 要以環境變數形式注入的變數。

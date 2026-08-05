@@ -54,24 +54,51 @@ public enum JobAdmission: Sendable, Equatable {
         let features: [UnsupportedJobFeature] = unsupportedFeatures(in: job)
         let blocking: [UnsupportedJobFeature] = features.filter { $0.severity == .fatal }
         guard blocking.isEmpty else { return .rejected(.init(features: blocking)) }
+        let budget: Int = timeoutPolicy.effectiveSeconds(declaredSeconds: job.runnerInfo?.timeoutSeconds)
         return .accepted(
             .init(
                 jobIdentifier: job.id,
                 git: job.gitInfo,
-                steps: job.steps,
+                steps: clamped(job.steps, toSeconds: budget),
                 environment: job.variables.filter { !$0.file },
                 fileVariables: job.variables.filter(\.file),
                 masker: .init(variables: job.variables),
-                timeoutSeconds: timeoutPolicy.effectiveSeconds(declaredSeconds: job.runnerInfo?.timeoutSeconds),
+                timeoutSeconds: budget,
                 warnings: features.filter { $0.severity == .warning }
             )
         )
     }
 
+    /// 把每個步驟宣告的逾時夾進本次 job 的預算內。
+    ///
+    /// 不夾的話 `JobPlan` 會同時帶著「已夾的 job 逾時」與「未夾的步驟逾時」兩個互相打架的
+    /// 數字——執行端照步驟值跑就直接突破了本機硬上限，而那個上限存在的理由（一個跑飛的 job
+    /// 佔住執行格）完全沒有因為它寫在步驟層就消失。16.2 給每個步驟的本來就是同一個 job 級
+    /// 逾時的複本，夾成同一個值不會少跑任何東西。
+    ///
+    /// `0` 維持原樣＝站台未宣告，執行端回落 job 逾時。
+    private static func clamped(_ steps: [JobStep], toSeconds budget: Int) -> [JobStep] {
+        steps.map { step in
+            guard step.timeoutSeconds > budget else { return step }
+            return .init(
+                name: step.name,
+                script: step.script,
+                allowFailure: step.allowFailure,
+                timeoutSeconds: budget,
+                runCondition: step.runCondition
+            )
+        }
+    }
+
     /// 掃出 payload 裡所有本片不消化的能力宣告，依「先擋路的、後可降級的」排列。
     private static func unsupportedFeatures(in job: JobResponse) -> [UnsupportedJobFeature] {
         var features: [UnsupportedJobFeature] = []
-        if let imageName: String = job.imageName, !imageName.isEmpty {
+        // 讀不懂的欄位排最前面：底下每一條判定都建立在「payload 形狀如預期」之上，
+        // 這個前提一旦不成立，其餘結論全都不可信。
+        features.append(contentsOf: job.unreadableFields.map(UnsupportedJobFeature.unreadablePayloadField(name:)))
+        // 判準是「CI 檔有沒有要求 image」而非「名字寫了沒」——送了 image 物件卻沒帶名字，
+        // 要求仍然成立，當沒看到就會讓一個要容器的 job 在裸環境跑完回綠。
+        if let imageName: String = job.imageName {
             features.append(.image(name: imageName))
         }
         if job.serviceCount > 0 {
