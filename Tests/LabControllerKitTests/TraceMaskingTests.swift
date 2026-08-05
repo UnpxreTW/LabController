@@ -128,6 +128,38 @@ private final class MaskedTraceStreamTests {
         #expect(stream.flush().isEmpty)
     }
 
+    /// 一個片語是另一個片語的前綴時，跨段仍不得露出長片語多出來的那一截。
+    ///
+    /// 這是「緩衝區存原文」的理由：存已遮過的文字，短片語會在前半段就被換掉、原文銷毀，
+    /// 長片語之後永遠對不上，多出來的尾巴照樣送上站台。
+    @Test
+    func `phrase that is a prefix of another does not leak its tail across chunks`() {
+        var stream: MaskedTraceStream = .init(
+            masker: .init(maskedValues: ["synthetic-token", "synthetic-token-long"])
+        )
+        var emitted: String = ""
+        emitted += stream.append("value=synthetic-token")
+        emitted += stream.append("-long end")
+        emitted += stream.flush()
+        #expect(emitted == "value=[MASKED] end")
+    }
+
+    /// 分段送出的結果必須與一次送出的結果一致——切法不該改變遮蔽結果。
+    @Test
+    func `streamed output matches whole text masking for every split point`() {
+        let masker: TraceMasker = .init(maskedValues: ["synthetic-token", "synthetic-token-long", "second"])
+        let text: String = "a synthetic-token-long b second c synthetic-token d"
+        let expected: String = masker.mask(text)
+        for split in 0 ... text.count {
+            var stream: MaskedTraceStream = .init(masker: masker)
+            let index: String.Index = text.index(text.startIndex, offsetBy: split)
+            var emitted: String = stream.append(String(text[..<index]))
+            emitted += stream.append(String(text[index...]))
+            emitted += stream.flush()
+            #expect(emitted == expected, "切在第 \(split) 個字元時結果不一致")
+        }
+    }
+
     /// 整段一次送進來、值完整落在中間時照樣遮掉。
     @Test
     func `whole chunk containing the phrase is masked`() {

@@ -28,7 +28,18 @@ public struct JobStep: Decodable, Sendable, Equatable {
     public let timeoutSeconds: Int
 
     /// 此步驟在什麼結果下才跑；對應協議欄位 `when`。
+    ///
+    /// 對映不到時這裡是 `.onSuccess`，真正送來的字串留在 `unrecognisedRunCondition`——
+    /// 讀這個欄位前先確認那個是 nil。
     public let runCondition: JobStepWhen
+
+    /// 站台送來、但本片對映不到的 `when` 值；對映得到時為 nil。
+    ///
+    /// 存在理由是**回落值不可信**：`when` 決定的是「這步驟在哪種結果下該跑」，站台日後多
+    /// 一個條件（例如只在取消時收拾現場）而我們回落成 `on_success`，那個步驟就會在正常成功
+    /// 路徑上跑起來——不是少做一件事，是做了一件不該做的事。故由 `JobResponse` 收進
+    /// `unreadableFields`、`JobAdmission` 據以拒收。
+    public let unrecognisedRunCondition: String?
 
     /// 以顯式欄位建立（測試用；正式路徑一律由回應解碼而來）。
     public init(
@@ -36,20 +47,22 @@ public struct JobStep: Decodable, Sendable, Equatable {
         script: [String],
         allowFailure: Bool = false,
         timeoutSeconds: Int = 0,
-        runCondition: JobStepWhen = .onSuccess
+        runCondition: JobStepWhen = .onSuccess,
+        unrecognisedRunCondition: String? = nil
     ) {
         self.name = name
         self.script = script
         self.allowFailure = allowFailure
         self.timeoutSeconds = timeoutSeconds
         self.runCondition = runCondition
+        self.unrecognisedRunCondition = unrecognisedRunCondition
     }
 
     /// 解碼；`script` 缺席視為空、`allow_failure` 缺席視為 false、`timeout` 缺席視為 0。
     ///
-    /// `when` 走「解成字串再對映」而非直接解成 enum：站台將來多一個條件值時，直接解
-    /// enum 會讓整包 payload 解不開、job 被當成解碼失敗丟掉；對映不到時回落
-    /// `on_success` 只會少跑一個步驟，止損範圍小得多。
+    /// `when` 走「解成字串再對映」而非直接解成 enum：站台將來多一個條件值時，直接解 enum
+    /// 會讓整包 payload 解不開、job 被當成解碼失敗丟掉。**但對映不到不等於可以裝作沒事**
+    /// ——原字串留在 `unrecognisedRunCondition`，由收件判定擋下。
     public init(from decoder: any Decoder) throws {
         let container: KeyedDecodingContainer<CodingKeys> = try decoder.container(keyedBy: CodingKeys.self)
         self.name = try container.decode(String.self, forKey: .name)
@@ -57,7 +70,9 @@ public struct JobStep: Decodable, Sendable, Equatable {
         self.allowFailure = try container.decodeIfPresent(Bool.self, forKey: .allowFailure) ?? false
         self.timeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .timeoutSeconds) ?? 0
         let condition: String? = try container.decodeIfPresent(String.self, forKey: .runCondition)
-        self.runCondition = condition.flatMap(JobStepWhen.init(rawValue:)) ?? .onSuccess
+        let mapped: JobStepWhen? = condition.flatMap(JobStepWhen.init(rawValue:))
+        self.runCondition = mapped ?? .onSuccess
+        self.unrecognisedRunCondition = mapped == nil ? condition : nil
     }
 
     /// 對應站台端欄位名（snake_case）。

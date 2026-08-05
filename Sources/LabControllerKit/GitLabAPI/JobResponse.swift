@@ -116,6 +116,11 @@ public struct JobResponse: Decodable, Sendable, Equatable {
             forKey: .dependencies,
             into: &unreadable
         ) ?? []
+        // `when` 對映不到不是「少一個小欄位」：回落值會讓步驟跑在錯的結果分支上，與形狀
+        // 漂移同級，因此走同一條通道擋下。一個 job 只記一次，別讓 100 個步驟刷出 100 行。
+        if self.steps.contains(where: { $0.unrecognisedRunCondition != nil }) {
+            unreadable.append("steps[].when")
+        }
         self.unreadableFields = unreadable
     }
 

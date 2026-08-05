@@ -62,7 +62,7 @@ public enum JobAdmission: Sendable, Equatable {
                 steps: clamped(job.steps, toSeconds: budget),
                 environment: job.variables.filter { !$0.file },
                 fileVariables: job.variables.filter(\.file),
-                masker: .init(variables: job.variables),
+                masker: .init(variables: job.variables, jobToken: job.token),
                 timeoutSeconds: budget,
                 warnings: features.filter { $0.severity == .warning }
             )
@@ -76,15 +76,17 @@ public enum JobAdmission: Sendable, Equatable {
     /// 佔住執行格）完全沒有因為它寫在步驟層就消失。16.2 給每個步驟的本來就是同一個 job 級
     /// 逾時的複本，夾成同一個值不會少跑任何東西。
     ///
-    /// `0` 維持原樣＝站台未宣告，執行端回落 job 逾時。
+    /// `0` 維持原樣＝站台未宣告，執行端回落 job 逾時；**負值一律歸零**——它既不是「未宣告」
+    /// 也不在預算內，帶著它往下走，執行端把它轉成無號時距時會變成近乎無限，正好繞過這裡。
     private static func clamped(_ steps: [JobStep], toSeconds budget: Int) -> [JobStep] {
         steps.map { step in
-            guard step.timeoutSeconds > budget else { return step }
+            let seconds: Int = max(0, min(step.timeoutSeconds, budget))
+            guard seconds != step.timeoutSeconds else { return step }
             return .init(
                 name: step.name,
                 script: step.script,
                 allowFailure: step.allowFailure,
-                timeoutSeconds: budget,
+                timeoutSeconds: seconds,
                 runCondition: step.runCondition
             )
         }

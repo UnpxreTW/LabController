@@ -40,6 +40,16 @@ public struct TraceMasker: Sendable, Equatable {
         self.init(maskedValues: variables.filter(\.masked).map(\.value))
     }
 
+    /// 自 job 變數建立，另外無條件把 job token 也列為片語。
+    ///
+    /// **token 沒有 `masked` 旗標可以依靠**：站台不會把它當成變數送過來，但它會從別的
+    /// 路徑走進 trace——最典型的是 `git_info.repo_url` 內嵌的 userinfo，clone 失敗時
+    /// git 會把完整 remote URL 印進 stderr。一枚仍在有效期內的 token 就這樣留在任何
+    /// 專案成員都讀得到的 log 裡。多遮一個字串的成本是零，沒有反面。
+    public init(variables: [JobVariable], jobToken: String) {
+        self.init(maskedValues: variables.filter(\.masked).map(\.value) + [jobToken])
+    }
+
     /// 遮蔽一段**內容已完整**的文字。
     ///
     /// 分段串流的 trace 不要直接用這支：值很可能橫跨兩段、各自遮都不命中。那個情境走
@@ -51,17 +61,7 @@ public struct TraceMasker: Sendable, Equatable {
     public func mask(_ text: String) -> String {
         guard !phrases.isEmpty, !text.isEmpty else { return text }
         let characters: [Character] = .init(text)
-        var covered: [Bool] = .init(repeating: false, count: characters.count)
-        for phrase in phrases {
-            let pattern: [Character] = .init(phrase)
-            guard pattern.count <= characters.count else { continue }
-            for start in 0 ... (characters.count - pattern.count)
-            where Array(characters[start ..< (start + pattern.count)]) == pattern {
-                for offset in start ..< (start + pattern.count) {
-                    covered[offset] = true
-                }
-            }
-        }
+        let covered: [Bool] = coverage(of: characters)
         var masked: String = ""
         var index: Int = 0
         while index < characters.count {
@@ -76,6 +76,25 @@ public struct TraceMasker: Sendable, Equatable {
             }
         }
         return masked
+    }
+
+    /// 標出每個字元是否落在某個片語的命中區間內。
+    ///
+    /// 串流遮蔽要靠這份標記決定切點：切在命中區間中間會把一個還沒完成的比對截斷，
+    /// 因此切點必須避開任何區間內部。
+    func coverage(of characters: [Character]) -> [Bool] {
+        var covered: [Bool] = .init(repeating: false, count: characters.count)
+        for phrase in phrases {
+            let pattern: [Character] = .init(phrase)
+            guard pattern.count <= characters.count else { continue }
+            for start in 0 ... (characters.count - pattern.count)
+            where characters[start...].starts(with: pattern) {
+                for offset in start ..< (start + pattern.count) {
+                    covered[offset] = true
+                }
+            }
+        }
+        return covered
     }
 
     /// 最長片語的長度；串流遮蔽時據此決定要押住多少尾巴。

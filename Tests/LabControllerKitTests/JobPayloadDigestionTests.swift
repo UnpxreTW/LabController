@@ -34,13 +34,27 @@ private final class JobPayloadDecodingTests {
         #expect(job.steps.last?.allowFailure == true)
     }
 
-    /// 未知的 `when` 值不得讓整包 payload 解不開——那會讓已指派的 job 被丟掉。
+    /// 未知的 `when` 值不得讓整包 payload 解不開——那會讓已指派的 job 被丟掉；
+    /// 但原字串必須留著，回落值不可以被當成站台真的這樣說。
     @Test
-    func `unknown run condition falls back instead of throwing`() throws {
+    func `unknown run condition is kept instead of throwing`() throws {
         let job: JobResponse = try decodeJob(#"""
         {"id":1,"token":"t","steps":[{"name":"script","script":["x"],"when":"on_moon_phase"}]}
         """#)
         #expect(job.steps.first?.runCondition == .onSuccess)
+        #expect(job.steps.first?.unrecognisedRunCondition == "on_moon_phase")
+        #expect(job.unreadableFields == ["steps[].when"])
+    }
+
+    /// 認得的 `when` 不留殘值，也不得誤記進讀不懂的欄位。
+    @Test
+    func `known run condition leaves no residue`() throws {
+        let job: JobResponse = try decodeJob(#"""
+        {"id":1,"token":"t","steps":[{"name":"after_script","script":["x"],"when":"always"}]}
+        """#)
+        #expect(job.steps.first?.runCondition == .always)
+        #expect(job.steps.first?.unrecognisedRunCondition == nil)
+        #expect(job.unreadableFields.isEmpty)
     }
 
     /// `runner_info.timeout` 解得出來；缺席時為 nil 而非 0，讓政策層分得出「沒說」。
@@ -154,8 +168,20 @@ private final class JobAdmissionTests {
         #expect(plan.fileVariables.map(\.key) == ["DEPLOY_KEY"])
         #expect(plan.timeoutSeconds == 600)
         #expect(plan.warnings.isEmpty)
-        // masked 的值不論走環境還是檔案，都要進遮蔽片語。
-        #expect(plan.masker.phrases == ["synthetic-secret-value"])
+        // masked 的值不論走環境還是檔案，都要進遮蔽片語；job token 沒有旗標可依靠，
+        // 但它會經由 git_info.repo_url 的 userinfo 走進 trace，一律無條件遮。
+        #expect(plan.masker.phrases.sorted() == ["synthetic-job-token", "synthetic-secret-value"])
+    }
+
+    /// 未知的 `when` 值擋下整個 job——回落成 `on_success` 會讓步驟跑在錯的結果分支上。
+    @Test
+    func `unrecognised run condition blocks admission`() {
+        let job: JobResponse = .init(id: 1, token: "t", unreadableFields: ["steps[].when"])
+        guard case let .rejected(rejection) = JobAdmission.review(job) else {
+            Issue.record("預期 rejected")
+            return
+        }
+        #expect(rejection.features == [.unreadablePayloadField(name: "steps[].when")])
     }
 
     /// 宣告 services 直接拒收，訊息指名是 services、失敗分類為不重試。
@@ -338,6 +364,21 @@ private final class JobTimeoutPolicyTests {
         #expect(plan.timeoutSeconds == 900)
         // 超過預算的夾成預算、原本就在預算內的不動、未宣告（0）維持 0 讓執行端回落 job 預算。
         #expect(plan.steps.map(\.timeoutSeconds) == [900, 300, 0])
+    }
+
+    /// 負的步驟逾時歸零＝回落「未宣告」；帶著它往下走，執行端轉無號時距會變成近乎無限。
+    @Test
+    func `negative step timeout falls back to unset`() {
+        let job: JobResponse = .init(
+            id: 1,
+            token: "t",
+            steps: [.init(name: "script", script: ["make"], timeoutSeconds: -5)]
+        )
+        guard case let .accepted(plan) = JobAdmission.review(job, timeoutPolicy: .init(hardLimitSeconds: 600)) else {
+            Issue.record("預期 accepted")
+            return
+        }
+        #expect(plan.steps.map(\.timeoutSeconds) == [0])
     }
 }
 
