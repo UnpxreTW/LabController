@@ -20,12 +20,15 @@
 /// 回報，一路掛到逾時，而且 log 上只有一行「body 解不開」。所以其餘欄位一律改成：形狀
 /// 不符預期就把鍵名記進 `unreadableFields`、其餘部分照常解，交由 `JobAdmission` 擋下並
 /// 在 trace 上明說。**協議漂移要讓 job 紅得看得見，不是讓 job 消失。**
-public struct JobResponse: Decodable, Sendable, Equatable {
+public struct JobResponse: Decodable, Sendable, Equatable,
+    CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
 
     /// job 識別碼；trace 回寫與狀態回報都用它組路徑。
     public let id: Int
 
     /// 此 job 專屬的短命 token；trace／狀態回報用它認證，與 runner 認證 token 不同。
+    ///
+    /// ⚠️ **憑證**：本型別的 `description`／`customMirror` 刻意不含它，變數值同理。
     public let token: String
 
     /// job 環境變數。
@@ -93,6 +96,35 @@ public struct JobResponse: Decodable, Sendable, Equatable {
         self.cacheCount = cacheCount
         self.dependencies = dependencies
         self.unreadableFields = unreadableFields
+    }
+
+    /// 印出來只給形狀；`token` 與變數值不進任何輸出。
+    public var description: String {
+        "JobResponse(id: \(id), steps: \(steps.count), variables: \(variables.count))"
+    }
+
+    /// 與 `description` 相同；debug 情境更需要這層保護，不是更不需要。
+    public var debugDescription: String {
+        description
+    }
+
+    /// `dump` 走 `Mirror`、繞過上面兩者，故一併收口。
+    public var customMirror: Mirror {
+        .init(
+            self,
+            children: [
+                "id": id,
+                "steps": steps.count,
+                "variables": variables.count,
+                "imageName": imageName ?? "nil",
+                "serviceCount": serviceCount,
+                "artifactCount": artifactCount,
+                "cacheCount": cacheCount,
+                "dependencies": dependencies.count,
+                "unreadableFields": unreadableFields,
+            ],
+            displayStyle: .struct
+        )
     }
 
     /// 解碼；集合類欄位缺席一律視為空，形狀不符則記進 `unreadableFields` 而非拋出。
@@ -187,18 +219,21 @@ public struct JobResponse: Decodable, Sendable, Equatable {
             return nil
         }
         guard !isNull else { return nil }
+        // 形狀讀不懂時只記 unreadable、不另外回一個假的名字：`unreadableFields` 已足以擋下
+        // 這個 job，再補一條「image 名稱為（未具名）」只會在 trace 上多一行誤導——名字其實
+        // 就在 payload 裡，只是我們讀不出它的形狀。
         guard let image: KeyedDecodingContainer<ImageCodingKeys> = try? container.nestedContainer(
             keyedBy: ImageCodingKeys.self,
             forKey: .image
         ) else {
             unreadable.append(CodingKeys.image.stringValue)
-            return ""
+            return nil
         }
         do {
             return try image.decodeIfPresent(String.self, forKey: .name) ?? ""
         } catch {
             unreadable.append(CodingKeys.image.stringValue)
-            return ""
+            return nil
         }
     }
 

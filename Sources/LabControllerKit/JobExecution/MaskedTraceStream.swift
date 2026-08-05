@@ -71,7 +71,7 @@ public struct MaskedTraceStream: Sendable {
         while cut > 0, cut < raw.count, covered[cut - 1], covered[cut] {
             cut -= 1
         }
-        guard cut > 0 else { return forcedRelease(raw, holdBack: holdBack) }
+        guard cut > 0 else { return forcedRelease(raw, covered: covered, holdBack: holdBack) }
         pending = .init(raw[cut...])
         coveredPrefix = 0
         return masker.rendering(raw[..<cut], covered: covered[..<cut])
@@ -82,11 +82,18 @@ public struct MaskedTraceStream: Sendable {
     /// 退到 0 這件事本身就保證了 `raw[0 ..< raw.count - holdBack]` 全被覆蓋，因此整段換
     /// 一個遮蔽字樣即可、不會外洩；押住的尾巴同樣已知被覆蓋，用 `coveredPrefix` 帶到下一
     /// 輪。代價只是同一段秘密會被拆成兩個遮蔽字樣，換到的是「trace 一定會前進」。
-    private mutating func forcedRelease(_ raw: [Character], holdBack: Int) -> String {
+    private mutating func forcedRelease(_ raw: [Character], covered: [Bool], holdBack: Int) -> String {
         guard raw.count > bufferLimit else { return "" }
         let cut: Int = raw.count - holdBack
         pending = .init(raw[cut...])
-        coveredPrefix = holdBack
+        // 只標「確實還在命中區間內」的那幾個字元。整段標成 covered 會把區間結束後的正常
+        // trace 一起吞進遮蔽字樣——例如秘密後面緊接著一行錯誤訊息，那行會靜靜消失，
+        // 而站台端看到的只是兩個遮蔽字樣、沒有任何徵兆說少了東西。
+        var known: Int = 0
+        while cut + known < raw.count, covered[cut + known] {
+            known += 1
+        }
+        coveredPrefix = known
         return TraceMasker.maskToken
     }
 

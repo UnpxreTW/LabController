@@ -141,6 +141,33 @@ private final class JobPayloadDecodingTests {
         #expect(try decodeJob(#"{"id":1,"token":"t","image":{}}"#).imageName == "")
         #expect(try decodeJob(#"{"id":1,"token":"t","image":{"name":""}}"#).imageName == "")
     }
+
+    /// `image` 形狀讀不懂時只記 unreadable，不另外編一個名字出來誤導 trace。
+    @Test
+    func `unreadable image shape reports only the field`() throws {
+        let job: JobResponse = try decodeJob(#"{"id":1,"token":"t","image":"synthetic:1.0"}"#)
+        #expect(job.imageName == nil)
+        #expect(job.unreadableFields == ["image"])
+    }
+
+    /// 短於下限的遮蔽值不遮，但「有值沒遮」這件事本身要看得見。
+    @Test
+    func `dropped short masked values are counted`() {
+        let job: JobResponse = .init(
+            id: 1,
+            token: "synthetic-job-token",
+            variables: [
+                .init(key: "SHORT", value: "ab", masked: true),
+                .init(key: "LONG", value: "synthetic-secret-value", masked: true)
+            ]
+        )
+        guard case let .accepted(plan) = JobAdmission.review(job) else {
+            Issue.record("預期 accepted")
+            return
+        }
+        #expect(plan.masker.phraseCount == 2)
+        #expect(plan.masker.droppedPhraseCount == 1)
+    }
 }
 
 /// 收件判定（`JobAdmission`）的行為。

@@ -28,6 +28,12 @@ public struct TraceMasker: Sendable, Equatable {
     /// 秘密清單——而讀到那行 log 的人不會知道自己正在看什麼。
     let phrases: [String]
 
+    /// 因短於 `minimumPhraseLength` 而未列入的值數量。
+    ///
+    /// **丟棄不可以是靜默的**：「有東西被標成要遮、但我們沒遮」這件事本身必須看得見，
+    /// 否則設定寫錯時沒有人會發現。這裡只記數量、不記內容。
+    public let droppedPhraseCount: Int
+
     /// 片語數量；供呼叫端做健全性檢查，不洩漏內容。
     public var phraseCount: Int {
         phrases.count
@@ -45,11 +51,18 @@ public struct TraceMasker: Sendable, Equatable {
     public init(maskedValues: [String]) {
         var seen: Set<String> = []
         var unique: [String] = []
-        for value in maskedValues where value.count >= Self.minimumPhraseLength {
+        var dropped: Int = 0
+        for value in maskedValues {
+            guard value.count >= Self.minimumPhraseLength else {
+                // 空字串不算「被丟棄的秘密」——那是沒有值，不是有值卻沒遮。
+                dropped += value.isEmpty ? 0 : 1
+                continue
+            }
             guard seen.insert(value).inserted else { continue }
             unique.append(value)
         }
         self.phrases = unique.sorted { $0.count > $1.count }
+        self.droppedPhraseCount = dropped
     }
 
     /// 自 job 變數取出所有標了 `masked` 的值建立。
@@ -137,7 +150,7 @@ extension TraceMasker: CustomStringConvertible, CustomDebugStringConvertible, Cu
 
     /// 只描述規模。
     public var description: String {
-        "TraceMasker(phrases: \(phrases.count))"
+        "TraceMasker(phrases: \(phrases.count), dropped: \(droppedPhraseCount))"
     }
 
     /// 與 `description` 相同；debug 情境更需要這層保護，不是更不需要。
@@ -147,6 +160,10 @@ extension TraceMasker: CustomStringConvertible, CustomDebugStringConvertible, Cu
 
     /// `dump` 走 `Mirror`、繞過上面兩者，故一併收口成無子節點。
     public var customMirror: Mirror {
-        .init(self, children: ["phrases": phrases.count], displayStyle: .struct)
+        .init(
+            self,
+            children: ["phrases": phrases.count, "droppedPhraseCount": droppedPhraseCount],
+            displayStyle: .struct
+        )
     }
 }

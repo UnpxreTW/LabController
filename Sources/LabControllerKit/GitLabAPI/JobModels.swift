@@ -76,6 +76,10 @@ extension JobVariable: CustomStringConvertible, CustomDebugStringConvertible, Cu
 public struct GitInfo: Decodable, Sendable, Equatable {
 
     /// 倉庫網址。
+    ///
+    /// ⚠️ **可能內嵌憑證**：站台慣例會把 job token 放進 userinfo（`user:token@host/...`），
+    /// 因此這個字串不可原樣印出或寫進 trace。本型別的 `description` 已把 userinfo 抹掉，
+    /// 但要送去別的地方前請自己再確認一次。
     public let repoURL: String
 
     /// 分支或 tag 名稱。
@@ -107,6 +111,40 @@ public struct GitInfo: Decodable, Sendable, Equatable {
         case repoURL = "repo_url"
         case ref
         case sha
+    }
+}
+
+/// 印出來的網址一律抹掉 userinfo。
+extension GitInfo: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+
+    /// 抹掉 userinfo 的網址加上 ref／sha。
+    public var description: String {
+        "GitInfo(repo: \(Self.withoutUserInfo(repoURL)), ref: \(ref), sha: \(sha))"
+    }
+
+    /// 與 `description` 相同；debug 情境更需要這層保護，不是更不需要。
+    public var debugDescription: String {
+        description
+    }
+
+    /// `dump` 走 `Mirror`、繞過上面兩者，故一併收口。
+    public var customMirror: Mirror {
+        .init(
+            self,
+            children: ["repoURL": Self.withoutUserInfo(repoURL), "ref": ref, "sha": sha],
+            displayStyle: .struct
+        )
+    }
+
+    /// 把 `scheme://user:secret@host/...` 的 userinfo 段換掉。
+    ///
+    /// 只認 `://` 與其後第一個 `@`——不解析整個 URL，是因為這裡的責任只有「別把憑證印出來」，
+    /// 而一個解析不了的網址更該保守處理，不是原樣放行。
+    private static func withoutUserInfo(_ url: String) -> String {
+        guard let schemeEnd: Range<String.Index> = url.range(of: "://") else { return url }
+        let rest: Substring = url[schemeEnd.upperBound...]
+        guard let at: String.Index = rest.firstIndex(of: "@") else { return url }
+        return url[..<schemeEnd.upperBound] + "***@" + rest[rest.index(after: at)...]
     }
 }
 

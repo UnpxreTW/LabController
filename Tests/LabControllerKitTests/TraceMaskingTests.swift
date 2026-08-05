@@ -194,6 +194,43 @@ private final class MaskedTraceStreamTests {
         #expect(emitted.replacingOccurrences(of: "[MASKED]", with: "").isEmpty)
     }
 
+    /// 強制放行不得把秘密後面的正常 trace 一起吞掉。
+    ///
+    /// 押住的尾巴橫跨「秘密結尾」與「其後的明文」時，若整段標成已覆蓋，那段明文會被併進
+    /// 遮蔽字樣、永遠送不出去——而且不留任何徵兆說少了東西。
+    @Test
+    func `forced release does not swallow trailing plain text`() {
+        let secret: String = "synthetic-secret"
+        var stream: MaskedTraceStream = .init(masker: .init(maskedValues: [secret]))
+        var emitted: String = stream.append(String(repeating: secret, count: 5) + "ERROR")
+        emitted += stream.flush()
+        #expect(emitted.contains("ERROR"))
+        #expect(!emitted.contains("synthetic"))
+    }
+
+    /// 分段送與一次送的差異只允許出現在「遮蔽字樣被拆成幾個」，明文部分必須逐字相同。
+    @Test
+    func `forced release preserves every plain character`() {
+        let secret: String = "synthetic-secret"
+        let text: String = String(repeating: secret, count: 6) + "tail-marker" + secret + "end"
+        let masker: TraceMasker = .init(maskedValues: [secret])
+        for chunkSize in [1, 7, 16, 40] {
+            var stream: MaskedTraceStream = .init(masker: masker)
+            var emitted: String = ""
+            var index: String.Index = text.startIndex
+            while index < text.endIndex {
+                let next: String.Index = text.index(index, offsetBy: chunkSize, limitedBy: text.endIndex)
+                    ?? text.endIndex
+                emitted += stream.append(String(text[index ..< next]))
+                index = next
+            }
+            emitted += stream.flush()
+            let plain: String = emitted.replacingOccurrences(of: "[MASKED]", with: "")
+            #expect(plain == "tail-markerend", "chunk 大小 \(chunkSize) 時明文被動到了")
+            #expect(!emitted.contains("synthetic"))
+        }
+    }
+
     /// 強制放行之後押住的尾巴仍是秘密的一部分，`flush` 不得把它原樣吐出來。
     @Test
     func `forced release does not leak the held back tail`() {
@@ -234,6 +271,38 @@ private final class SecretRedactionTests {
             #expect(!String(reflecting: variable).contains("synthetic"))
             #expect(!dumped.contains("synthetic"))
             #expect("\(variable)".contains(variable.key))
+        }
+    }
+
+    /// `GitInfo` 印出來的網址不得帶 userinfo——站台慣例會把 job token 放在那裡。
+    @Test
+    func `git info never prints embedded credentials`() {
+        let info: GitInfo = .init(
+            repoURL: "https://gitlab-ci-token:synthetic-job-token@example.invalid/group/app.git",
+            ref: "main",
+            sha: "0123456789abcdef"
+        )
+        var dumped: String = ""
+        dump(info, to: &dumped)
+        for rendered in ["\(info)", String(reflecting: info), dumped] {
+            #expect(!rendered.contains("synthetic-job-token"))
+            #expect(rendered.contains("example.invalid/group/app.git"))
+        }
+    }
+
+    /// `JobResponse` 印出來不得帶 token 或變數值。
+    @Test
+    func `job response never prints its token`() {
+        let job: JobResponse = .init(
+            id: 3,
+            token: "synthetic-job-token",
+            variables: [.init(key: "DEPLOY_KEY", value: "synthetic-secret-value", masked: true)]
+        )
+        var dumped: String = ""
+        dump(job, to: &dumped)
+        for rendered in ["\(job)", String(reflecting: job), dumped] {
+            #expect(!rendered.contains("synthetic-job-token"))
+            #expect(!rendered.contains("synthetic-secret-value"))
         }
     }
 

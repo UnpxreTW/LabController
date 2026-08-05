@@ -30,6 +30,9 @@ public enum JobAdmission: Sendable, Equatable {
         /// 內插進去，而站台端對這些欄位可能已經做過變數展開——`image: $PRIVATE_REGISTRY`
         /// 這種寫法會讓一個 masked 值出現在拒收訊息的第一行。把遮蔽做成結構保證，不要靠
         /// 「這條路徑應該不會有秘密」的慣例。
+        ///
+        /// ⚠️ 本欄位計入 `Equatable`：缺口清單相同、但來自不同 job 的兩個 `Rejection`
+        /// **不相等**。要比較「為什麼被拒」請比 `features`，不要比整個值。
         public let masker: TraceMasker
 
         /// 以缺口清單建立。
