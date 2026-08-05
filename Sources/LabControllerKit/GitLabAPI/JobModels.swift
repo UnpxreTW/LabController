@@ -49,6 +49,29 @@ public struct JobVariable: Decodable, Sendable, Equatable {
     }
 }
 
+/// 印出來只給名稱與旗標、不給值。
+///
+/// 一個變數是不是秘密，看的是站台有沒有標 `masked`——但**沒標的也未必能公開**（部署憑證
+/// 靠設定紀律而非旗標的情況很常見）。預設反射會把每個 `value` 原樣吐出來，因此這裡一律
+/// 不印值，不分是否 masked。
+extension JobVariable: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+
+    /// 只描述名稱與旗標。
+    public var description: String {
+        "JobVariable(key: \(key), masked: \(masked), file: \(file))"
+    }
+
+    /// 與 `description` 相同；debug 情境更需要這層保護，不是更不需要。
+    public var debugDescription: String {
+        description
+    }
+
+    /// `dump` 走 `Mirror`、繞過上面兩者，故一併收口。
+    public var customMirror: Mirror {
+        .init(self, children: ["key": key, "masked": masked, "file": file], displayStyle: .struct)
+    }
+}
+
 /// job 對應的 git 座標；供後續切片在執行沙箱內取出正確的程式碼版本。
 public struct GitInfo: Decodable, Sendable, Equatable {
 

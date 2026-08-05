@@ -24,9 +24,18 @@ public enum JobAdmission: Sendable, Equatable {
         /// 造成拒收的每一項缺口。
         public let features: [UnsupportedJobFeature]
 
+        /// 寫進 trace 前要套的遮蔽規則。
+        ///
+        /// 拒收路徑也要遮：`traceMessage` 會把 payload 衍生的字串（image 名、上游 job 名）
+        /// 內插進去，而站台端對這些欄位可能已經做過變數展開——`image: $PRIVATE_REGISTRY`
+        /// 這種寫法會讓一個 masked 值出現在拒收訊息的第一行。把遮蔽做成結構保證，不要靠
+        /// 「這條路徑應該不會有秘密」的慣例。
+        public let masker: TraceMasker
+
         /// 以缺口清單建立。
-        public init(features: [UnsupportedJobFeature]) {
+        public init(features: [UnsupportedJobFeature], masker: TraceMasker = .init(maskedValues: [])) {
             self.features = features
+            self.masker = masker
         }
 
         /// 回報給站台的失敗分類。
@@ -37,9 +46,9 @@ public enum JobAdmission: Sendable, Equatable {
             .scriptFailure
         }
 
-        /// 寫進 trace 的完整說明；逐項列出缺了什麼，一項一行。
+        /// 寫進 trace 的完整說明；逐項列出缺了什麼，一項一行，且已過遮蔽。
         public var traceMessage: String {
-            features.map(\.traceMessage).joined(separator: "\n")
+            masker.mask(features.map(\.traceMessage).joined(separator: "\n"))
         }
     }
 
@@ -52,8 +61,9 @@ public enum JobAdmission: Sendable, Equatable {
         timeoutPolicy: JobTimeoutPolicy = .init()
     ) -> JobAdmission {
         let features: [UnsupportedJobFeature] = unsupportedFeatures(in: job)
+        let masker: TraceMasker = .init(variables: job.variables, jobToken: job.token)
         let blocking: [UnsupportedJobFeature] = features.filter { $0.severity == .fatal }
-        guard blocking.isEmpty else { return .rejected(.init(features: blocking)) }
+        guard blocking.isEmpty else { return .rejected(.init(features: blocking, masker: masker)) }
         let budget: Int = timeoutPolicy.effectiveSeconds(declaredSeconds: job.runnerInfo?.timeoutSeconds)
         return .accepted(
             .init(
@@ -62,7 +72,7 @@ public enum JobAdmission: Sendable, Equatable {
                 steps: clamped(job.steps, toSeconds: budget),
                 environment: job.variables.filter { !$0.file },
                 fileVariables: job.variables.filter(\.file),
-                masker: .init(variables: job.variables, jobToken: job.token),
+                masker: masker,
                 timeoutSeconds: budget,
                 warnings: features.filter { $0.severity == .warning }
             )
@@ -82,12 +92,14 @@ public enum JobAdmission: Sendable, Equatable {
         steps.map { step in
             let seconds: Int = max(0, min(step.timeoutSeconds, budget))
             guard seconds != step.timeoutSeconds else { return step }
+            // 逐欄複製、只換逾時：漏掉任何一欄都會靜默丟失資訊，而丟失的那一刻不會有人發現。
             return .init(
                 name: step.name,
                 script: step.script,
                 allowFailure: step.allowFailure,
                 timeoutSeconds: seconds,
-                runCondition: step.runCondition
+                runCondition: step.runCondition,
+                unrecognisedRunCondition: step.unrecognisedRunCondition
             )
         }
     }

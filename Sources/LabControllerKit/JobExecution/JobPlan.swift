@@ -9,8 +9,13 @@
 /// 消化過的 job payload：站台送來的原始欄位已解讀成執行端可以照著跑的形狀。
 ///
 /// 只描述「要跑什麼」、不涉及「在哪跑」——沙箱、clone、程序啟動由後續切片承接。本型別
-/// 刻意不持有任何執行器概念，也刻意不持有 job token：token 只在協議層用得到，讓它跟著
-/// 執行計劃到處走，就是讓它多好幾個會被印出來的機會。
+/// 刻意不持有任何執行器概念。
+///
+/// ⚠️ **本型別含明文秘密，不得序列化、寫檔或印出**：`environment`／`fileVariables` 帶著
+/// 變數原值，`masker` 內含 job token 與每一個 masked 變數的值（token 以遮蔽片語的形式
+/// 在這裡，因為它會經由 `git_info.repo_url` 的 userinfo 走進 trace，不遮就會留在 log 裡）。
+/// `description`／`debugDescription`／`customMirror` 三條路都已收成摘要，但那是防手滑、
+/// 不是許可——要落地任何一部分，先想清楚落到哪、誰讀得到。
 public struct JobPlan: Sendable, Equatable {
 
     /// job 識別碼。
@@ -63,5 +68,35 @@ public struct JobPlan: Sendable, Equatable {
         self.masker = masker
         self.timeoutSeconds = timeoutSeconds
         self.warnings = warnings
+    }
+}
+
+/// 印出來只給形狀、不給內容。
+extension JobPlan: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+
+    /// 只描述規模與識別碼。
+    public var description: String {
+        "JobPlan(job: \(jobIdentifier), steps: \(steps.count), timeout: \(timeoutSeconds)s)"
+    }
+
+    /// 與 `description` 相同；debug 情境更需要這層保護，不是更不需要。
+    public var debugDescription: String {
+        description
+    }
+
+    /// `dump` 走 `Mirror`、繞過上面兩者，故一併收口。
+    public var customMirror: Mirror {
+        .init(
+            self,
+            children: [
+                "jobIdentifier": jobIdentifier,
+                "steps": steps.count,
+                "environment": environment.count,
+                "fileVariables": fileVariables.count,
+                "timeoutSeconds": timeoutSeconds,
+                "warnings": warnings.count,
+            ],
+            displayStyle: .struct
+        )
     }
 }

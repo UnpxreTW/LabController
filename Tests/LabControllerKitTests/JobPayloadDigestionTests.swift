@@ -7,7 +7,7 @@
 //  SPDX-License-Identifier: Apache-2.0
 
 import Foundation
-import LabControllerKit
+@testable import LabControllerKit
 import Testing
 
 /// 把 JSON 字面解成 `JobResponse`；解不出即測試失敗。
@@ -171,6 +171,23 @@ private final class JobAdmissionTests {
         // masked 的值不論走環境還是檔案，都要進遮蔽片語；job token 沒有旗標可依靠，
         // 但它會經由 git_info.repo_url 的 userinfo 走進 trace，一律無條件遮。
         #expect(plan.masker.phrases.sorted() == ["synthetic-job-token", "synthetic-secret-value"])
+    }
+
+    /// 拒收訊息也要過遮蔽：站台可能對 `image:` 做過變數展開，秘密會落在訊息第一行。
+    @Test
+    func `rejection message is masked`() {
+        let job: JobResponse = .init(
+            id: 1,
+            token: "t",
+            variables: [.init(key: "REGISTRY", value: "synthetic-secret-host", masked: true)],
+            imageName: "synthetic-secret-host/app:1.0"
+        )
+        guard case let .rejected(rejection) = JobAdmission.review(job) else {
+            Issue.record("預期 rejected")
+            return
+        }
+        #expect(!rejection.traceMessage.contains("synthetic-secret-host"))
+        #expect(rejection.traceMessage.contains("[MASKED]"))
     }
 
     /// 未知的 `when` 值擋下整個 job——回落成 `on_success` 會讓步驟跑在錯的結果分支上。

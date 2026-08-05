@@ -6,7 +6,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
-import LabControllerKit
+@testable import LabControllerKit
 import Testing
 
 /// 遮蔽片語的整理與單次遮蔽。
@@ -27,28 +27,36 @@ private final class TraceMaskerTests {
     /// 空值不當片語——否則每個字元邊界都會命中，整份 log 被切爛。
     @Test
     func `empty values are not phrases`() {
-        #expect(TraceMasker(maskedValues: ["", "abc"]).phrases == ["abc"])
+        #expect(TraceMasker(maskedValues: ["", "abcd"]).phrases == ["abcd"])
+    }
+
+    /// 短於下限的值不遮：那個長度的字串會命中幾乎每一行，而它本來也不可能是憑證。
+    @Test
+    func `phrases shorter than the minimum are dropped`() {
+        let masker: TraceMasker = .init(maskedValues: ["t", "abc", "abcd"])
+        #expect(masker.phrases == ["abcd"])
+        #expect(masker.mask("t abc abcd") == "t abc [MASKED]")
     }
 
     /// 重複片語去重。
     @Test
     func `duplicate phrases are deduplicated`() {
-        #expect(TraceMasker(maskedValues: ["abc", "abc"]).phrases == ["abc"])
+        #expect(TraceMasker(maskedValues: ["abcd", "abcd"]).phrases == ["abcd"])
     }
 
     /// 片語依長度由長至短排序：短的先命中會把長的切碎、露出剩下的尾巴。
     @Test
     func `phrases are ordered longest first`() {
-        let masker: TraceMasker = .init(maskedValues: ["ab", "abcdef", "abcd"])
-        #expect(masker.phrases == ["abcdef", "abcd", "ab"])
-        #expect(masker.mask("value=abcdef") == "value=[MASKED]")
+        let masker: TraceMasker = .init(maskedValues: ["abcd", "abcdefgh", "abcdef"])
+        #expect(masker.phrases == ["abcdefgh", "abcdef", "abcd"])
+        #expect(masker.mask("value=abcdefgh") == "value=[MASKED]")
     }
 
     /// 同一個值出現幾次就遮幾次。
     @Test
     func `every occurrence is replaced`() {
-        let masker: TraceMasker = .init(maskedValues: ["tok"])
-        #expect(masker.mask("tok and tok") == "[MASKED] and [MASKED]")
+        let masker: TraceMasker = .init(maskedValues: ["tok3n"])
+        #expect(masker.mask("tok3n and tok3n") == "[MASKED] and [MASKED]")
     }
 
     /// 沒有片語時原樣通過。
@@ -70,8 +78,8 @@ private final class TraceMaskerTests {
     /// 只有真正屬於片語的字元被遮，前後文原樣保留。
     @Test
     func `masking does not swallow surrounding text`() {
-        let masker: TraceMasker = .init(maskedValues: ["mid"])
-        #expect(masker.mask("a mid b mid c") == "a [MASKED] b [MASKED] c")
+        let masker: TraceMasker = .init(maskedValues: ["midd"])
+        #expect(masker.mask("a midd b midd c") == "a [MASKED] b [MASKED] c")
     }
 }
 
@@ -167,5 +175,85 @@ private final class MaskedTraceStreamTests {
         var emitted: String = stream.append("start abcdef end")
         emitted += stream.flush()
         #expect(emitted == "start [MASKED] end")
+    }
+
+    /// 片語首尾相接鋪滿整個緩衝區時 trace 仍必須前進。
+    ///
+    /// 切點會一路退到 0（整段都在命中區間內），沒有強制放行的出口就會變成：緩衝區隨輸出
+    /// 線性成長、每輪重掃退化成 O(n²)，站台端看到一個「跑很久卻零輸出」的 job。
+    @Test
+    func `contiguous phrase repetition still makes progress`() {
+        var stream: MaskedTraceStream = .init(masker: .init(maskedValues: ["synthetic-secret"]))
+        var emitted: String = ""
+        for _ in 0 ..< 2000 {
+            emitted += stream.append("synthetic-secret")
+        }
+        #expect(!emitted.isEmpty, "緩衝區卡住＝trace 完全停送")
+        emitted += stream.flush()
+        // 內容全是秘密，因此輸出只能由遮蔽字樣組成——一個原始字元都不許漏。
+        #expect(emitted.replacingOccurrences(of: "[MASKED]", with: "").isEmpty)
+    }
+
+    /// 強制放行之後押住的尾巴仍是秘密的一部分，`flush` 不得把它原樣吐出來。
+    @Test
+    func `forced release does not leak the held back tail`() {
+        let secret: String = String(repeating: "s3cr3t-", count: 4)
+        var stream: MaskedTraceStream = .init(masker: .init(maskedValues: [secret]))
+        var emitted: String = ""
+        for _ in 0 ..< 1000 {
+            emitted += stream.append(secret)
+        }
+        emitted += stream.flush()
+        #expect(!emitted.contains("s3cr3t"))
+    }
+}
+
+/// 秘密不得因為某個人順手印了一個容器就外流。
+private final class SecretRedactionTests {
+
+    /// `TraceMasker` 的四條輸出路徑都只給數量。
+    @Test
+    func `masker never prints its phrases`() {
+        let masker: TraceMasker = .init(maskedValues: ["synthetic-secret-value"])
+        var dumped: String = ""
+        dump(masker, to: &dumped)
+        for rendered in ["\(masker)", String(describing: masker), String(reflecting: masker), dumped] {
+            #expect(!rendered.contains("synthetic-secret-value"))
+        }
+    }
+
+    /// `JobVariable` 不論有沒有標 masked 都不印值——旗標只是站台的判斷，不是唯一的秘密來源。
+    @Test
+    func `variable never prints its value`() {
+        let plain: JobVariable = .init(key: "PLAIN", value: "synthetic-plain-value")
+        let secret: JobVariable = .init(key: "SECRET", value: "synthetic-secret-value", masked: true)
+        for variable in [plain, secret] {
+            var dumped: String = ""
+            dump(variable, to: &dumped)
+            #expect(!"\(variable)".contains("synthetic"))
+            #expect(!String(reflecting: variable).contains("synthetic"))
+            #expect(!dumped.contains("synthetic"))
+            #expect("\(variable)".contains(variable.key))
+        }
+    }
+
+    /// `JobPlan` 印出來只給形狀。
+    @Test
+    func `plan never prints variable values or phrases`() {
+        let job: JobResponse = .init(
+            id: 5,
+            token: "synthetic-job-token",
+            variables: [.init(key: "DEPLOY_KEY", value: "synthetic-secret-value", masked: true)]
+        )
+        guard case let .accepted(plan) = JobAdmission.review(job) else {
+            Issue.record("預期 accepted")
+            return
+        }
+        var dumped: String = ""
+        dump(plan, to: &dumped)
+        for rendered in ["\(plan)", String(reflecting: plan), dumped] {
+            #expect(!rendered.contains("synthetic-secret-value"))
+            #expect(!rendered.contains("synthetic-job-token"))
+        }
     }
 }

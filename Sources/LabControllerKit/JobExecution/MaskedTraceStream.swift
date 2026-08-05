@@ -25,6 +25,24 @@ public struct MaskedTraceStream: Sendable {
     /// 尚未放行的尾段；**存的是原文**，遮蔽只在放行的那一刻做。
     private var pending: String = ""
 
+    /// `pending` 開頭已知落在命中區間內的字元數。
+    ///
+    /// 強制放行時帶過來的：那些字元在下一輪的緩衝區裡未必還能自己比中一個完整片語
+    /// （前半已經被放掉了），但它們確實是秘密的一部分，不標起來就會在 `flush` 時裸奔。
+    private var coveredPrefix: Int = 0
+
+    /// 緩衝區字元數上限；超過即強制放行一段。
+    ///
+    /// 只有「片語首尾相接連續鋪滿」這一種形狀會逼到這裡——正常 trace 撐不到。定這個上限
+    /// 是因為沒有它時該形狀會讓 trace **完全停送**、緩衝區隨輸出線性成長，而每輪都要重掃
+    /// 整個緩衝區，整體退化成 O(n²)。站台端看到的會是一個「跑很久卻零輸出」的 job。
+    ///
+    /// 綁在最長片語上而非取固定值：每次 `append` 的成本正比於緩衝區長度，上限訂得越寬、
+    /// 那個形狀下的每輪重掃就越貴。四倍足夠讓區間有空間跨過切點，又把成本壓在同一個數量級。
+    private var bufferLimit: Int {
+        max(4 * masker.longestPhraseLength, 64)
+    }
+
     /// 以遮蔽規則建立。
     public init(masker: TraceMasker) {
         self.masker = masker
@@ -46,16 +64,39 @@ public struct MaskedTraceStream: Sendable {
         // 片語最長 n 個字元時，尾端 n-1 個字元都還可能是某個片語的開頭，不能放。
         let holdBack: Int = masker.longestPhraseLength - 1
         guard raw.count > holdBack else { return "" }
-        let covered: [Bool] = masker.coverage(of: raw)
+        let covered: [Bool] = markedCoverage(of: raw)
         var cut: Int = raw.count - holdBack
         // 切點落在命中區間內部時往前退到區間起點：切在中間會把還沒比完的區間截斷，
         // 前半被當成完整命中遮掉、後半留在緩衝區，於是原文被銷毀、長片語再也對不上。
         while cut > 0, cut < raw.count, covered[cut - 1], covered[cut] {
             cut -= 1
         }
-        guard cut > 0 else { return "" }
+        guard cut > 0 else { return forcedRelease(raw, holdBack: holdBack) }
         pending = .init(raw[cut...])
-        return masker.mask(String(raw[..<cut]))
+        coveredPrefix = 0
+        return masker.rendering(raw[..<cut], covered: covered[..<cut])
+    }
+
+    /// 切點退到 0（整個緩衝區都在同一段命中區間內）時的出口。
+    ///
+    /// 退到 0 這件事本身就保證了 `raw[0 ..< raw.count - holdBack]` 全被覆蓋，因此整段換
+    /// 一個遮蔽字樣即可、不會外洩；押住的尾巴同樣已知被覆蓋，用 `coveredPrefix` 帶到下一
+    /// 輪。代價只是同一段秘密會被拆成兩個遮蔽字樣，換到的是「trace 一定會前進」。
+    private mutating func forcedRelease(_ raw: [Character], holdBack: Int) -> String {
+        guard raw.count > bufferLimit else { return "" }
+        let cut: Int = raw.count - holdBack
+        pending = .init(raw[cut...])
+        coveredPrefix = holdBack
+        return TraceMasker.maskToken
+    }
+
+    /// 取命中標記，並把上一輪帶過來的「已知被覆蓋」前綴補上。
+    private func markedCoverage(of raw: [Character]) -> [Bool] {
+        var covered: [Bool] = masker.coverage(of: raw)
+        for index in 0 ..< min(coveredPrefix, raw.count) {
+            covered[index] = true
+        }
+        return covered
     }
 
     /// job 結束時把緩衝區剩下的內容全部放行。
@@ -63,8 +104,10 @@ public struct MaskedTraceStream: Sendable {
     /// 不呼叫這支就收工，最後幾個字元會留在記憶體裡永遠送不出去——trace 尾巴缺一小截、
     /// 而且缺得毫無徵兆。
     public mutating func flush() -> String {
-        let remaining: String = pending
+        let raw: [Character] = .init(pending)
+        let covered: [Bool] = markedCoverage(of: raw)
         pending = ""
-        return masker.mask(remaining)
+        coveredPrefix = 0
+        return masker.rendering(raw[...], covered: covered[...])
     }
 }

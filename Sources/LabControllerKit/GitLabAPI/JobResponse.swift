@@ -164,7 +164,13 @@ public struct JobResponse: Decodable, Sendable, Equatable {
             unreadable.append(key.stringValue)
             return 0
         }
-        return nested.count ?? 0
+        // 數不出筆數就不能當「沒宣告」——那是該拒不拒的方向。實務上 JSONDecoder 一定給得出
+        // 來，但這個 `??` 的預設值決定的是「不確定時往哪邊倒」，倒向 0 等於默默放行。
+        guard let count: Int = nested.count else {
+            unreadable.append(key.stringValue)
+            return 0
+        }
+        return count
     }
 
     /// 取出 `image.name`；job 未指定 image 時站台把該欄位送成 null。

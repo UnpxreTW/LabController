@@ -22,13 +22,30 @@ public struct TraceMasker: Sendable, Equatable {
     public static let maskToken: String = "[MASKED]"
 
     /// 要遮的片語；已去空、去重，並依長度由長至短排序。
-    public let phrases: [String]
+    ///
+    /// **internal、且本型別不把它印出來**：這裡裝的是 job token 與每一個 masked 變數的
+    /// 明文值。留成 public 等於在任何 `print`／字串內插／測試失敗差異輸出裡放一份完整的
+    /// 秘密清單——而讀到那行 log 的人不會知道自己正在看什麼。
+    let phrases: [String]
 
-    /// 以片語清單建立。
+    /// 片語數量；供呼叫端做健全性檢查，不洩漏內容。
+    public var phraseCount: Int {
+        phrases.count
+    }
+
+    /// 片語長度下限；短於此者不遮。
+    ///
+    /// 遮蔽的代價不是零：一個長度 1 的片語會命中幾乎每一行，整份 trace 變成一串遮蔽字樣，
+    /// 讀 log 的人什麼都查不到——而那個長度的字串本來也不可能是憑證。**下限保護的是可讀性，
+    /// 代價是短字串不遮**；job token 與站台的遮蔽變數都遠長於此，實務上落在下限以下的只有
+    /// 測試替身與設定失誤。
+    public static let minimumPhraseLength: Int = 4
+
+    /// 以片語清單建立；空字串、重複值與短於下限者一律剔除。
     public init(maskedValues: [String]) {
         var seen: Set<String> = []
         var unique: [String] = []
-        for value in maskedValues where !value.isEmpty {
+        for value in maskedValues where value.count >= Self.minimumPhraseLength {
             guard seen.insert(value).inserted else { continue }
             unique.append(value)
         }
@@ -61,17 +78,25 @@ public struct TraceMasker: Sendable, Equatable {
     public func mask(_ text: String) -> String {
         guard !phrases.isEmpty, !text.isEmpty else { return text }
         let characters: [Character] = .init(text)
-        let covered: [Bool] = coverage(of: characters)
+        return rendering(characters[...], covered: coverage(of: characters)[...])
+    }
+
+    /// 依既有的命中標記輸出文字：連續被標記的區間併成一個遮蔽字樣，其餘原樣保留。
+    ///
+    /// 標記與輸出分開，是為了讓串流那一側能把「上一輪已知被覆蓋」的資訊帶進來——那些
+    /// 字元在本輪的緩衝區裡未必還能自己比中一個完整片語，但它們確實是秘密的一部分。
+    func rendering(_ characters: ArraySlice<Character>, covered: ArraySlice<Bool>) -> String {
         var masked: String = ""
-        var index: Int = 0
-        while index < characters.count {
-            guard covered[index] else {
+        var index: Int = characters.startIndex
+        while index < characters.endIndex {
+            guard covered[covered.startIndex + (index - characters.startIndex)] else {
                 masked.append(characters[index])
                 index += 1
                 continue
             }
             masked += Self.maskToken
-            while index < characters.count, covered[index] {
+            while index < characters.endIndex,
+                  covered[covered.startIndex + (index - characters.startIndex)] {
                 index += 1
             }
         }
@@ -100,5 +125,28 @@ public struct TraceMasker: Sendable, Equatable {
     /// 最長片語的長度；串流遮蔽時據此決定要押住多少尾巴。
     var longestPhraseLength: Int {
         phrases.first?.count ?? 0
+    }
+}
+
+/// 印出來只給數量、不給內容。
+///
+/// 預設的反射輸出會把 `phrases` 整包吐出來，而那是 job token 加上每一個 masked 變數的
+/// 明文。這三個協定把 `print`／字串內插／`debugPrint`／`dump` 四條路都收口——秘密不該
+/// 因為某個人順手印了一個容器而外流。
+extension TraceMasker: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+
+    /// 只描述規模。
+    public var description: String {
+        "TraceMasker(phrases: \(phrases.count))"
+    }
+
+    /// 與 `description` 相同；debug 情境更需要這層保護，不是更不需要。
+    public var debugDescription: String {
+        description
+    }
+
+    /// `dump` 走 `Mirror`、繞過上面兩者，故一併收口成無子節點。
+    public var customMirror: Mirror {
+        .init(self, children: ["phrases": phrases.count], displayStyle: .struct)
     }
 }
