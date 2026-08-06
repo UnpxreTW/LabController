@@ -290,7 +290,11 @@ private final class ProjectResourcePollerCursorTests {
                 serverDate: "Thu, 06 Aug 2026 09:01:00 GMT"
             ),
         ])
-        let poller: ProjectResourcePoller = .init(transport: transport)
+        // 固定本機時鐘讓來回耗時恰為 0，把「起始時刻取自哪個回應」單獨隔離出來檢驗。
+        let poller: ProjectResourcePoller = .init(
+            transport: transport,
+            localClock: { .init(timeIntervalSince1970: reference) }
+        )
         let result: ResourcePollResult<SyntheticResource> = try await poller.poll(
             host: "https://gitlab.example.com",
             projectIdentifier: "42",
@@ -474,7 +478,10 @@ private final class ProjectResourcePollerCursorTests {
                 serverDate: "Thu, 06 Aug 2026 09:00:30 GMT"
             ),
         ])
-        let poller: ProjectResourcePoller = .init(transport: transport)
+        let poller: ProjectResourcePoller = .init(
+            transport: transport,
+            localClock: { .init(timeIntervalSince1970: reference) }
+        )
         let result: ResourcePollResult<SyntheticResource> = try await poller.poll(
             host: "https://gitlab.example.com",
             projectIdentifier: "42",
@@ -483,6 +490,43 @@ private final class ProjectResourcePollerCursorTests {
             cursor: .init()
         )
         #expect(result.cursor.watermark == Date(timeIntervalSince1970: reference + 30))
+    }
+
+    /// 站台時刻要再往前扣掉那一次來回的耗時。
+    ///
+    /// `Date` 標頭是**回應產生時**的時刻，晚於查詢取快照的瞬間。直接拿它當上限，上限就比快照晚一整個
+    /// 請求的時間；那段期間提交、時間戳卻更早的資料會落在新水位之下、再也讀不回來。
+    @Test
+    func `walk start subtracts the first round trip from the server clock`() async throws {
+        let transport: ScriptedTransport = .init([
+            pageResponse(
+                #"[{"id":1,"updated_at":"2026-08-06T09:00:50Z"}]"#,
+                page: 1,
+                nextPage: nil,
+                serverDate: "Thu, 06 Aug 2026 09:00:30 GMT"
+            ),
+        ])
+        // 本機時鐘每次讀取前進 8 秒 → 這次來回耗時量到 8 秒。
+        let ticks: Mutex<Int> = .init(0)
+        let poller: ProjectResourcePoller = .init(
+            transport: transport,
+            localClock: {
+                let tick: Int = ticks.withLock { count in
+                    defer { count += 1 }
+                    return count
+                }
+                return .init(timeIntervalSince1970: reference + Double(tick) * 8)
+            }
+        )
+        let result: ResourcePollResult<SyntheticResource> = try await poller.poll(
+            host: "https://gitlab.example.com",
+            projectIdentifier: "42",
+            collection: .mergeRequests,
+            privateToken: "synthetic-read-token",
+            cursor: .init()
+        )
+        // 站台回應時刻 09:00:30 減去 8 秒＝09:00:22，早於資源的 09:00:50 → 以它封頂。
+        #expect(result.cursor.watermark == Date(timeIntervalSince1970: reference + 22))
     }
 
     /// 站台沒送 `Date` 標頭時退回本機時鐘、並往前扣容差；扣的方向只會造成重讀。
@@ -670,6 +714,67 @@ private final class ProjectResourcePollerFailureTests {
         }
     }
 
+    /// 錯誤訊息不得帶原始網址：`https://oauth2:<token>@host` 是合法輸入，
+    /// 原樣放進錯誤就等於把憑證寫進每一行 log——那道守衛本來是要保護憑證的。
+    @Test
+    func `rejection never echoes credentials from the host`() async {
+        let secret: String = "synthetic-token-value"
+        let transport: ScriptedTransport = .init([])
+        let poller: ProjectResourcePoller = .init(transport: transport)
+        do {
+            let _: ResourcePollResult<SyntheticResource> = try await poller.poll(
+                host: "https://oauth2:\(secret)@gitlab.example.com",
+                projectIdentifier: "42",
+                collection: .issues,
+                privateToken: "synthetic-read-token",
+                cursor: .init()
+            )
+            Issue.record("帶 userinfo 的 host 應該被擋下")
+        } catch let GitLabAPIError.invalidURL(location) {
+            #expect(!location.contains(secret))
+            #expect(!location.contains("oauth2"))
+            // 仍要指得出是哪個站台，否則錯誤訊息沒有查的價值。
+            #expect(location == "https://gitlab.example.com")
+        } catch {
+            Issue.record("預期 invalidURL，實得 \(error)")
+        }
+    }
+
+    /// 空專案識別字會組出 `/projects//issues`——請求照樣帶著憑證送出、站台回 404，
+    /// 呼叫端看到的是「查無此專案」而不是「參數沒填」。必須在送出前擋掉。
+    @Test
+    func `empty project identifier is rejected before any request`() async {
+        let transport: ScriptedTransport = .init([])
+        let poller: ProjectResourcePoller = .init(transport: transport)
+        await #expect(throws: GitLabAPIError.self) {
+            let _: ResourcePollResult<SyntheticResource> = try await poller.poll(
+                host: "https://gitlab.example.com",
+                projectIdentifier: "",
+                collection: .issues,
+                privateToken: "synthetic-read-token",
+                cursor: .init()
+            )
+        }
+        #expect(transport.requests.withLock { $0.isEmpty })
+    }
+
+    /// 沒有主機名的網址（設定檔少打一段）必須擋下，而不是組出一個打不到任何地方的請求。
+    @Test
+    func `host without a hostname is rejected`() async {
+        let transport: ScriptedTransport = .init([])
+        let poller: ProjectResourcePoller = .init(transport: transport)
+        await #expect(throws: GitLabAPIError.self) {
+            let _: ResourcePollResult<SyntheticResource> = try await poller.poll(
+                host: "https:///gitlab",
+                projectIdentifier: "42",
+                collection: .issues,
+                privateToken: "synthetic-read-token",
+                cursor: .init()
+            )
+        }
+        #expect(transport.requests.withLock { $0.isEmpty })
+    }
+
     /// host 帶 userinfo 時必須擋下：那會把讀取憑證送到別人家。
     ///
     /// `https://gitlab.example.com@elsewhere.example` 解析後的 host 是 `elsewhere.example`、
@@ -711,7 +816,7 @@ private final class ProjectResourcePollerFailureTests {
     func `invalid host throws before any request`() async {
         let transport: ScriptedTransport = .init([])
         let poller: ProjectResourcePoller = .init(transport: transport)
-        await #expect(throws: GitLabAPIError.invalidURL("")) {
+        await #expect(throws: GitLabAPIError.self) {
             let _: ResourcePollResult<SyntheticResource> = try await poller.poll(
                 host: "",
                 projectIdentifier: "42",

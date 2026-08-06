@@ -74,7 +74,9 @@ public struct UpdatedAfterCursor: Sendable, Equatable, Hashable, Codable {
     ///   - observed: 本輪確認「其之前已無遺漏」的最大 `updated_at`；`nil` 表示本輪沒有可推進的
     ///     依據，水位原地不動。**哪一筆算數由呼叫端決定**——翻頁期間集合可能被改動，
     ///     判準寫在 `ProjectResourcePoller`。
-    ///   - walkStartedAt: 本輪開始時的**站台**時鐘。水位不會越過這個時刻。
+    ///   - walkStartedAt: 本輪第一個請求**送出之前**的**站台**時刻。水位不會越過它。
+    ///     必須是送出前、而非回應產生時：查詢的快照在兩者之間，取回應時刻當上限會讓上限比快照晚一整個
+    ///     請求的時間，那段期間提交的資料就落在新水位之下。取得方式見 `ProjectResourcePoller`。
     /// - Returns: 推進後的水位；不會比原水位早。
     ///
     /// `walkStartedAt` 這道上限的作用範圍要講清楚，因為它很容易被高估：它保證的是

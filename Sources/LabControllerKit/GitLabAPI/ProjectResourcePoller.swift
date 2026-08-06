@@ -47,8 +47,8 @@ import Foundation
 /// 無法做得安全：要跨就得先確定那一秒已經讀完，而唯一的證據只能來自第二頁以後——那正是不可採信的
 /// 位置。更根本的是，站台對 `updated_at` 沒有第二排序鍵，**時間戳完全相同的資源在不同次請求之間
 /// 順序未定**；同一群 tied 資源可能每次請求都回不同的子集合，於是「第二頁出現了更新的資源」
-/// 完全不能推論成「那一秒讀完了」。照那個推論跨過去，沒在任何一頁露過面的 tied 資源就此沉到水位之下、
-/// 永遠讀不到——實測 250 筆同時刻資源、翻頁期間零改動，仍有 22 筆從此消失。
+/// 完全不能推論成「那一秒讀完了」。照那個推論跨過去，沒在任何一頁露過面的同時刻資源就此沉到水位之下、
+/// 永遠讀不到——而且翻頁期間一筆改動都不需要發生。
 ///
 /// 因此本層的選擇是：**卡住但出聲，絕不用會漏資料的方式製造進度**。卡住期間資料仍在游標之上、
 /// 一筆都沒丟，換個做法就讀得回來；跨過去丟掉的則沒有任何一層會發現。
@@ -155,6 +155,7 @@ public struct ProjectResourcePoller: Sendable {
         var pagesRead: Int = 0
         var isTruncated: Bool = false
         while true {
+            let sentAt: Date = localClock()
             let response: HTTPResponse = try await send(
                 host: host,
                 projectIdentifier: projectIdentifier,
@@ -163,13 +164,17 @@ public struct ProjectResourcePoller: Sendable {
                 cursor: cursor,
                 page: page
             )
+            let roundTrip: TimeInterval = max(0, localClock().timeIntervalSince(sentAt))
             guard response.statusCode == 200 else {
                 throw GitLabAPIError.unexpectedStatus(response.statusCode)
             }
-            // 起始時刻只取自**第一個**回應。後面每一頁都晚於它，用它當上限對整輪都成立；
-            // 逐頁刷新會讓上限跟著往後漂，等於沒有上限。
+            // 起始時刻只取自**第一個**回應，且要往前扣掉那一次來回的耗時。
+            // `Date` 標頭是**回應產生時**的站台時刻，晚於查詢取快照的瞬間；直接拿它當上限，
+            // 上限就比快照晚了一整個請求的時間，那段期間提交的資料會落在新水位之下、再也讀不到。
+            // 扣掉本機量到的來回耗時（純時距、與時鐘域無關）即得一個必定不晚於快照的時刻。
+            // 逐頁刷新同樣不行——上限會跟著往後漂，等於沒有上限。
             if walkStartedAt == nil {
-                walkStartedAt = Self.serverTime(of: response) ?? fallbackStartTime()
+                walkStartedAt = Self.serverTime(of: response)?.addingTimeInterval(-roundTrip) ?? fallbackStartTime()
             }
             let batch: [Element]
             do {
@@ -197,16 +202,18 @@ public struct ProjectResourcePoller: Sendable {
             }
             page = nextPage
         }
+        // 迴圈至少跑一輪、且在該輪就設定起始時刻，否則早已拋錯離開；`??` 只是讓型別收斂。
         let startedAt: Date = walkStartedAt ?? fallbackStartTime()
         let advanced: UpdatedAfterCursor = cursor.advanced(to: firstPageMaximum, noLaterThan: startedAt)
-        // 沒有上限時本來會不會動？用來分辨「本來就沒東西可推進」與「有東西、卻推不動」。
-        // 後者含三種：被時鐘上限壓住、同秒群塞滿第一頁、以及第一頁是空的卻還有下一頁。
-        let hadRoomToAdvance: Bool = (firstPageMaximum.map(cursor.wouldAdvance) ?? false)
-            || sawResourceBeyondCursor
+        // 游標沒動時，下一輪會不會讀到一模一樣的東西？兩個各自獨立的來源：
+        // ①看到了越過游標的資源卻推不動（被時鐘上限壓住，或同秒群塞滿第一頁）；
+        // ②第一頁是空的卻還有下一頁——站台異常，第一頁沒有任何可採信的證據，游標永遠不會動。
+        // ② 不可省：它可能在完全沒有「越過游標的資源」的情況下發生，那時 ① 為假、狀態卻照樣重複。
+        let firstPageEmptyWithMore: Bool = firstPageMaximum == nil && pagesRead > 1
         let completion: PollCompletion = Self.completion(
             isTruncated: isTruncated,
             didAdvance: advanced != cursor,
-            hadRoomToAdvance: hadRoomToAdvance
+            willRepeat: sawResourceBeyondCursor || firstPageEmptyWithMore
         )
         return .init(elements: elements, cursor: advanced, completion: completion)
     }
@@ -280,16 +287,30 @@ public struct ProjectResourcePoller: Sendable {
         return formatter.date(from: raw)
     }
 
-    /// 由「有沒有撞到預算」「游標動了沒」「本來動不動得了」三者判本輪收尾狀態。
+    /// 由「有沒有撞到預算」「游標動了沒」「會不會重複下去」三者判本輪收尾狀態。
     ///
     /// 游標沒動有兩種完全不同的意思。**本來就沒東西可推進**（沒讀到資料，或讀到的都還在游標那一秒內）
-    /// 是正常的安靜輪次；**有東西可推進卻沒動**則代表下一輪會讀到一模一樣的內容、再次沒動，
+    /// 是正常的安靜輪次；**會原封不動再來一次**則代表下一輪讀到一模一樣的內容、再次沒動，
     /// 如此反覆而每一輪各自看起來都成功了。後者必須具名為 `stalled`，撞到預算而原地踏步同理。
-    static func completion(isTruncated: Bool, didAdvance: Bool, hadRoomToAdvance: Bool) -> PollCompletion {
+    static func completion(isTruncated: Bool, didAdvance: Bool, willRepeat: Bool) -> PollCompletion {
         guard didAdvance else {
-            return (isTruncated || hadRoomToAdvance) ? .stalled : .complete
+            return (isTruncated || willRepeat) ? .stalled : .complete
         }
         return isTruncated ? .truncated : .complete
+    }
+
+    /// 把網址字串收斂成可安全記錄的位置描述。
+    ///
+    /// **絕不把原字串放進錯誤**：`https://oauth2:<token>@gitlab.example.com` 這種形狀是合法輸入，
+    /// 原樣帶進 `invalidURL` 就等於把憑證寫進每一行 log 與每一份當機報告——那道守衛本來是要保護憑證的。
+    /// 只保留 scheme／host／port；連這些都取不出來時回一個固定字串，不回退到原值。
+    static func safeLocation(of urlString: String) -> String {
+        guard let components: URLComponents = .init(string: urlString), let host: String = components.host else {
+            return "<無法解析的網址>"
+        }
+        let scheme: String = components.scheme.map { "\($0)://" } ?? ""
+        let port: String = components.port.map { ":\($0)" } ?? ""
+        return "\(scheme)\(host)\(port)"
     }
 
     /// 取不到站台時鐘時的替代起始時刻：本機時鐘往前扣容差。
@@ -308,8 +329,11 @@ public struct ProjectResourcePoller: Sendable {
     ) async throws -> HTTPResponse {
         var unreserved: CharacterSet = .alphanumerics
         unreserved.insert(charactersIn: "-._~")
-        guard let identifier: String = projectIdentifier.addingPercentEncoding(withAllowedCharacters: unreserved) else {
-            throw GitLabAPIError.invalidURL(projectIdentifier)
+        // 空專案識別字會組出 `/projects//issues`：請求照樣帶著憑證送出去、站台回 404，
+        // 呼叫端看到的是「查無此專案」而不是「參數沒填」。在這裡擋掉才指得出真正的原因。
+        guard !projectIdentifier.isEmpty,
+              let identifier: String = projectIdentifier.addingPercentEncoding(withAllowedCharacters: unreserved) else {
+            throw GitLabAPIError.invalidURL("<專案識別字無效>")
         }
         // host 先自己解析成元件再接路徑，不先做字串串接：串接會讓帶查詢字串或片段的 host
         // 把整段 `/api/v4/…` 吞進查詢或片段裡，組出一個打在站台首頁、卻完全不像壞掉的網址。
@@ -324,7 +348,7 @@ public struct ProjectResourcePoller: Sendable {
               // 讀取憑證卻會連同 PRIVATE-TOKEN 標頭一起送到別人家。
               components.user == nil,
               components.password == nil else {
-            throw GitLabAPIError.invalidURL(host)
+            throw GitLabAPIError.invalidURL(Self.safeLocation(of: host))
         }
         // 修掉結尾**所有**斜線：只修一個的話 `…example.com//` 會組出 `//api/v4/…`，路徑多一層空片段。
         let base: String = .init(components.percentEncodedPath.reversed().drop { $0 == "/" }.reversed())
@@ -342,7 +366,7 @@ public struct ProjectResourcePoller: Sendable {
         }
         components.queryItems = items
         guard let url: URL = components.url else {
-            throw GitLabAPIError.invalidURL(host)
+            throw GitLabAPIError.invalidURL(Self.safeLocation(of: host))
         }
         let request: HTTPRequest = .init(
             method: "GET",
