@@ -27,12 +27,6 @@ public struct PageMarker: Sendable, Equatable {
     /// 站台回報這是第幾頁（`X-Page`）。
     public let page: Int
 
-    /// 站台實際採用的每頁筆數（`X-Per-Page`）；標頭缺席時為 `nil`。
-    ///
-    /// 保留它的用途是讓呼叫端看得到「站台把 `per_page` 收小了」——這不影響正確性，但會讓翻頁預算
-    /// 涵蓋的實際筆數比預期少，是排查「怎麼一直讀不完」時的第一個要看的數字。
-    public let perPage: Int?
-
     /// 下一頁頁碼；`nil` 代表這是最後一頁。
     public let nextPage: Int?
 
@@ -42,7 +36,11 @@ public struct PageMarker: Sendable, Equatable {
     ///   - response: 站台回應。
     ///   - requestedPage: 本次請求的頁碼。
     /// - Throws: `GitLabAPIError.malformedPagination`，於下列任一情況：
-    ///   - 缺 `X-Page` 或其值非整數——分頁標頭被中間層剝掉時，靜默當成單頁會讓輪詢**永遠只讀第一頁**。
+    ///   - 缺 `X-Page` 或 `X-Next-Page`，或其值非整數。站台這兩個標頭**一定會發**（最後一頁時
+    ///     `X-Next-Page` 是空字串而非省略），缺席即代表中途有東西把它拿掉了。此時靜默當成單頁，
+    ///     輪詢會每輪只讀一頁、而且回報一切正常——沒有資料遺失，但吞吐量無聲崩塌。
+    ///     ⚠ 代價是：若前方的中間層會把空值標頭整個丟掉，最後一頁就會變成錯誤。這是刻意選的方向
+    ///     ——錯誤看得見也修得掉，無聲的吞吐崩塌不會。
     ///   - `X-Page` 與 `requestedPage` 不符——快取或代理回了別頁。照收會把那頁的內容誤記成本頁，
     ///     且下一頁的頁碼是從錯的位置往下推。
     ///   - 下一頁頁碼不大於本頁——迴圈會原地打轉；這是唯一不需要外部計時器就能擋下的無限迴圈形狀。
@@ -53,19 +51,20 @@ public struct PageMarker: Sendable, Equatable {
         guard page == requestedPage else {
             throw GitLabAPIError.malformedPagination("要求第 \(requestedPage) 頁、站台回報第 \(page) 頁")
         }
-        // 空字串＝沒有下一頁（站台送的是 next_page.to_s，nil 會變成空字串而非省略標頭）。
-        let rawNext: String? = response.headerValue("X-Next-Page").flatMap { $0.isEmpty ? nil : $0 }
-        let nextPage: Int? = try rawNext.map { raw in
-            guard let value: Int = .init(raw) else {
-                throw GitLabAPIError.malformedPagination("X-Next-Page 非整數：\(raw)")
+        guard let rawNext: String = response.headerValue("X-Next-Page") else {
+            throw GitLabAPIError.malformedPagination("X-Next-Page 缺席；最後一頁應為空字串而非省略")
+        }
+        // 空字串＝沒有下一頁。
+        let nextPage: Int? = try rawNext.isEmpty ? nil : {
+            guard let value: Int = .init(rawNext) else {
+                throw GitLabAPIError.malformedPagination("X-Next-Page 非整數：\(rawNext)")
             }
             guard value > page else {
                 throw GitLabAPIError.malformedPagination("下一頁 \(value) 未大於本頁 \(page)")
             }
             return value
-        }
+        }()
         self.page = page
-        self.perPage = response.headerValue("X-Per-Page").flatMap(Int.init)
         self.nextPage = nextPage
     }
 }

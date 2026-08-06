@@ -38,6 +38,18 @@ import Foundation
 /// 排序方向因此不是偏好而是前提：`desc` 會把剛改動的資源放到第一頁（已讀過的方向），
 /// 且第一頁的最大值是全集最大值，游標一次就跳到最前面，跨過的全部都讀不回來。
 ///
+/// ### 唯一的例外：同秒群塞滿第一頁
+///
+/// 上面的規則有一個會卡死的邊角：**若同一秒的資源多到把第一頁塞滿**（一次交易批次改動、匯入），
+/// 第一頁的最大值取整後就等於現行游標，游標永遠推不動。那不只是原地踏步——同一批資源會每一輪
+/// 重新交出去一次，而且比它們新的資源永遠排在後面，多到超過翻頁預算時就再也讀不到，
+/// **從重複變成真正的遺漏**。
+///
+/// 因此當第一頁整頁落在游標那一秒內時，改推到「本輪讀到的、秒數已越過游標的最早一筆」，
+/// 也就是剛好跨出那一秒、不多跨。代價明說：**該秒的位移保護就此失效**——那一秒內若有資源在翻頁
+/// 期間被移動或刪除，可能就此漏掉。結果會以 `ResourcePollResult.crossedOversizedTie` 標出來。
+/// 若連跨都跨不出去（整輪預算都還在同一秒內），游標維持不動並回報 `PollCompletion.stalled`。
+///
 /// ## 上限：不晚於本輪起始的站台時鐘
 ///
 /// 推進值再壓上「本輪第一個回應所帶的站台時刻」。用站台時鐘而非本機時鐘，是因為本機時鐘若走快，
@@ -132,6 +144,7 @@ public struct ProjectResourcePoller: Sendable {
         let decoder: JSONDecoder = Self.makeResourceDecoder()
         var elements: [Element] = []
         var firstPageMaximum: Date?
+        var earliestBeyondCursor: Date?
         var walkStartedAt: Date?
         var page: Int = 1
         var pagesRead: Int = 0
@@ -153,13 +166,21 @@ public struct ProjectResourcePoller: Sendable {
             if walkStartedAt == nil {
                 walkStartedAt = Self.serverTime(of: response) ?? fallbackStartTime()
             }
-            guard let batch: [Element] = try? decoder.decode([Element].self, from: response.body) else {
-                throw GitLabAPIError.undecodableBody
+            let batch: [Element]
+            do {
+                batch = try decoder.decode([Element].self, from: response.body)
+            } catch {
+                // 整頁一起解，所以一筆寫壞就整頁失敗、而且每輪都會再撞一次；
+                // 錯誤訊息必須指得出是哪個欄位，否則只能靠猜。
+                throw GitLabAPIError.undecodableCollection(Self.describe(error))
             }
             let marker: PageMarker = try .init(response: response, requestedPage: page)
             elements.append(contentsOf: batch)
             if pagesRead == 0 {
                 firstPageMaximum = batch.map(\.updatedAt).max()
+            }
+            for element: Element in batch where cursor.wouldAdvance(to: element.updatedAt) {
+                earliestBeyondCursor = min(earliestBeyondCursor ?? element.updatedAt, element.updatedAt)
             }
             pagesRead += 1
             guard let nextPage: Int = marker.nextPage else {
@@ -172,15 +193,29 @@ public struct ProjectResourcePoller: Sendable {
             page = nextPage
         }
         let startedAt: Date = walkStartedAt ?? fallbackStartTime()
-        let advanced: UpdatedAfterCursor = cursor.advanced(to: firstPageMaximum, noLaterThan: startedAt)
+        var advanced: UpdatedAfterCursor = cursor.advanced(to: firstPageMaximum, noLaterThan: startedAt)
+        // 第一頁整頁落在游標那一秒內、後面還有頁：只採信第一頁的話游標永遠推不動（見型別說明的例外）。
+        let isWedgedOnTie: Bool = pagesRead > 1 && !(firstPageMaximum.map(cursor.wouldAdvance) ?? false)
+        var crossedOversizedTie: Bool = false
+        if isWedgedOnTie, let escape: Date = earliestBeyondCursor {
+            let escaped: UpdatedAfterCursor = cursor.advanced(to: escape, noLaterThan: startedAt)
+            crossedOversizedTie = escaped != cursor
+            advanced = escaped
+        }
         // 沒有上限時本來會不會動？用來分辨「本來就沒東西可推進」與「有東西、卻被上限壓住不動」。
-        let hadRoomToAdvance: Bool = cursor.advanced(to: firstPageMaximum, noLaterThan: .distantFuture) != cursor
+        let hadRoomToAdvance: Bool = (firstPageMaximum.map(cursor.wouldAdvance) ?? false)
+            || (isWedgedOnTie && earliestBeyondCursor.map(cursor.wouldAdvance) ?? false)
         let completion: PollCompletion = Self.completion(
             isTruncated: isTruncated,
             didAdvance: advanced != cursor,
             hadRoomToAdvance: hadRoomToAdvance
         )
-        return .init(elements: elements, cursor: advanced, completion: completion)
+        return .init(
+            elements: elements,
+            cursor: advanced,
+            completion: completion,
+            crossedOversizedTie: crossedOversizedTie
+        )
     }
 
     /// 產生本模組解 GitLab 資源用的解碼器。
@@ -211,6 +246,27 @@ public struct ProjectResourcePoller: Sendable {
             return date
         }
         return try? Date.ISO8601FormatStyle(includingFractionalSeconds: false).parse(raw)
+    }
+
+    /// 把解碼錯誤壓成一行可查的敘述：指出是哪個欄位、為什麼不合。
+    ///
+    /// 只取解碼器自己給的位置與說明，**不含回應本體**——本體可能很大，而且不該原樣進到錯誤訊息裡。
+    static func describe(_ error: any Error) -> String {
+        guard let decodingError: DecodingError = error as? DecodingError else {
+            return String(describing: error)
+        }
+        let context: DecodingError.Context? = switch decodingError {
+        case let .typeMismatch(_, context), let .valueNotFound(_, context),
+             let .keyNotFound(_, context), let .dataCorrupted(context):
+            context
+        @unknown default:
+            nil
+        }
+        guard let context else {
+            return String(describing: decodingError)
+        }
+        let path: String = context.codingPath.map(\.stringValue).joined(separator: ".")
+        return path.isEmpty ? context.debugDescription : "\(path)：\(context.debugDescription)"
     }
 
     /// 從回應的 `Date` 標頭取站台時鐘；標頭缺席或格式不符時回 `nil`。
@@ -254,7 +310,8 @@ public struct ProjectResourcePoller: Sendable {
         cursor: UpdatedAfterCursor,
         page: Int
     ) async throws -> HTTPResponse {
-        let base: String = host.hasSuffix("/") ? .init(host.dropLast()) : host
+        // 修掉結尾**所有**斜線：只修一個的話 `…example.com//` 會組出 `//api/v4/…`，路徑多一層空片段。
+        let base: String = .init(host.reversed().drop { $0 == "/" }.reversed())
         var unreserved: CharacterSet = .alphanumerics
         unreserved.insert(charactersIn: "-._~")
         guard let identifier: String = projectIdentifier.addingPercentEncoding(withAllowedCharacters: unreserved) else {

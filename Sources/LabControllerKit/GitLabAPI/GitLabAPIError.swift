@@ -21,6 +21,13 @@ public enum GitLabAPIError: Error, Equatable, Sendable {
     /// 回應本體解不出預期的 JSON 形狀。
     case undecodableBody
 
+    /// 集合本體解不開；附帶解碼器指出的位置與原因。
+    ///
+    /// 與 `undecodableBody` 分開，是因為集合是整頁一起解的：**一筆資源的一個欄位寫壞就會讓整頁失敗**，
+    /// 而那一頁每一輪都會再讀一次，於是輪詢從此卡死。只回一個沒有內容的錯誤等於要人自己去猜是哪一筆、
+    /// 哪個欄位；訊息裡帶著 `codingPath` 才有得查。內容只取解碼器的描述，不含回應本體。
+    case undecodableCollection(String)
+
     /// 分頁標頭缺席或彼此矛盾；附帶一句說明是哪裡對不上。
     ///
     /// 獨立成一個 case 而不併進 `invalidResponse`：分頁標頭壞掉時，回應本體通常是完全合法的一頁資料，

@@ -326,6 +326,80 @@ private final class ProjectResourcePollerCursorTests {
         #expect(result.cursor == cursor)
     }
 
+    /// 同一秒的資源塞滿第一頁時，游標改跨到「秒數已越過游標的最早一筆」，而不是永遠卡在原地。
+    ///
+    /// 卡住不只是原地踏步：同一批資源會每輪重新交出去一次，而比它們新的資源永遠排在後面，
+    /// 多到超過翻頁預算就再也讀不到——從重複變成真正的遺漏。
+    @Test
+    func `an oversized tie group on the first page is crossed`() async throws {
+        let transport: ScriptedTransport = .init([
+            pageResponse(
+                #"[{"id":1,"updated_at":"2026-08-06T09:00:00.100Z"},{"id":2,"updated_at":"2026-08-06T09:00:00.900Z"}]"#,
+                page: 1,
+                nextPage: 2
+            ),
+            pageResponse(
+                #"[{"id":3,"updated_at":"2026-08-06T09:00:20Z"},{"id":4,"updated_at":"2026-08-06T09:00:25Z"}]"#,
+                page: 2,
+                nextPage: nil,
+                serverDate: "Thu, 06 Aug 2026 09:01:00 GMT"
+            ),
+        ])
+        let poller: ProjectResourcePoller = .init(transport: transport)
+        let cursor: UpdatedAfterCursor = .init(watermark: .init(timeIntervalSince1970: reference))
+        let result: ResourcePollResult<SyntheticResource> = try await poller.poll(
+            host: "https://gitlab.example.com",
+            projectIdentifier: "42",
+            collection: .mergeRequests,
+            privateToken: "synthetic-read-token",
+            cursor: cursor
+        )
+        // 剛好跨出那一秒、不多跨：推到 09:00:20 而非本輪最大的 09:00:25。
+        #expect(result.cursor.watermark == Date(timeIntervalSince1970: reference + 20))
+        #expect(result.crossedOversizedTie)
+        #expect(result.completion == .complete)
+    }
+
+    /// 整輪預算都還在同一秒內：跨不出去，游標維持不動並報 `stalled`——絕不硬跳過還沒讀到的同秒資源。
+    @Test
+    func `a tie group larger than the whole budget stalls instead of skipping`() async throws {
+        let transport: ScriptedTransport = .init([
+            pageResponse(#"[{"id":1,"updated_at":"2026-08-06T09:00:00.100Z"}]"#, page: 1, nextPage: 2),
+            pageResponse(#"[{"id":2,"updated_at":"2026-08-06T09:00:00.900Z"}]"#, page: 2, nextPage: 3),
+        ])
+        let poller: ProjectResourcePoller = .init(transport: transport, pageBudget: 2)
+        let cursor: UpdatedAfterCursor = .init(watermark: .init(timeIntervalSince1970: reference))
+        let result: ResourcePollResult<SyntheticResource> = try await poller.poll(
+            host: "https://gitlab.example.com",
+            projectIdentifier: "42",
+            collection: .mergeRequests,
+            privateToken: "synthetic-read-token",
+            cursor: cursor
+        )
+        #expect(result.completion == .stalled)
+        #expect(result.cursor == cursor)
+        #expect(!result.crossedOversizedTie)
+    }
+
+    /// 反例配對：第一頁的最大值本來就推得動游標時，不算跨同秒群，旗標維持關閉。
+    @Test
+    func `a normal multi page walk does not report crossing a tie`() async throws {
+        let transport: ScriptedTransport = .init([
+            pageResponse(#"[{"id":1,"updated_at":"2026-08-06T09:00:05Z"}]"#, page: 1, nextPage: 2),
+            pageResponse(#"[{"id":2,"updated_at":"2026-08-06T09:00:20Z"}]"#, page: 2, nextPage: nil),
+        ])
+        let poller: ProjectResourcePoller = .init(transport: transport)
+        let result: ResourcePollResult<SyntheticResource> = try await poller.poll(
+            host: "https://gitlab.example.com",
+            projectIdentifier: "42",
+            collection: .mergeRequests,
+            privateToken: "synthetic-read-token",
+            cursor: .init(watermark: .init(timeIntervalSince1970: reference))
+        )
+        #expect(!result.crossedOversizedTie)
+        #expect(result.cursor.watermark == Date(timeIntervalSince1970: reference + 5))
+    }
+
     /// 反例配對：讀到的資源都還在游標那一秒內時，游標不動是正常的安靜輪次、不是卡住。
     @Test
     func `re reading the boundary second is not a stall`() async throws {
@@ -452,7 +526,7 @@ private final class ProjectResourcePollerFailureTests {
     func `undecodable body is surfaced`() async {
         let transport: ScriptedTransport = .init([pageResponse("not json", page: 1, nextPage: nil)])
         let poller: ProjectResourcePoller = .init(transport: transport)
-        await #expect(throws: GitLabAPIError.undecodableBody) {
+        await #expect(throws: GitLabAPIError.self) {
             let _: ResourcePollResult<SyntheticResource> = try await poller.poll(
                 host: "https://gitlab.example.com",
                 projectIdentifier: "42",
@@ -470,7 +544,7 @@ private final class ProjectResourcePollerFailureTests {
             pageResponse(#"[{"id":1,"updated_at":"yesterday"}]"#, page: 1, nextPage: nil),
         ])
         let poller: ProjectResourcePoller = .init(transport: transport)
-        await #expect(throws: GitLabAPIError.undecodableBody) {
+        await #expect(throws: GitLabAPIError.self) {
             let _: ResourcePollResult<SyntheticResource> = try await poller.poll(
                 host: "https://gitlab.example.com",
                 projectIdentifier: "42",
@@ -479,6 +553,37 @@ private final class ProjectResourcePollerFailureTests {
                 cursor: .init()
             )
         }
+    }
+
+    /// 解碼失敗要指得出是哪一個欄位：整頁一起解，一筆寫壞就整頁失敗、而且每輪都會再撞一次。
+    ///
+    /// 「某筆的 `updated_at` 寫壞」與「整包根本不是 JSON」若回一模一樣的錯誤，就沒有任何線索可查。
+    @Test
+    func `decoding failure names the offending field`() async throws {
+        let badField: ScriptedTransport = .init([
+            pageResponse(#"[{"id":1,"updated_at":"yesterday"}]"#, page: 1, nextPage: nil),
+        ])
+        let notJSON: ScriptedTransport = .init([pageResponse("not json", page: 1, nextPage: nil)])
+        var messages: [String] = []
+        for transport: ScriptedTransport in [badField, notJSON] {
+            let poller: ProjectResourcePoller = .init(transport: transport)
+            do {
+                let _: ResourcePollResult<SyntheticResource> = try await poller.poll(
+                    host: "https://gitlab.example.com",
+                    projectIdentifier: "42",
+                    collection: .mergeRequests,
+                    privateToken: "synthetic-read-token",
+                    cursor: .init()
+                )
+                Issue.record("解不開的本體應該拋錯")
+            } catch let GitLabAPIError.undecodableCollection(detail) {
+                messages.append(detail)
+            }
+        }
+        #expect(messages.count == 2)
+        // 兩種失敗必須分得出來，且欄位錯誤要指到那個欄位。
+        #expect(messages[0] != messages[1])
+        #expect(messages[0].contains("updated_at"))
     }
 
     /// 分頁標頭壞掉時中止整輪，不靜默只讀第一頁。

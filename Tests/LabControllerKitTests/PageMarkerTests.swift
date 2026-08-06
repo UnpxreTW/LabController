@@ -21,15 +21,17 @@ private final class PageMarkerTests {
         let marker: PageMarker = try .init(response: response, requestedPage: 3)
         #expect(marker.nextPage == nil)
         #expect(marker.page == 3)
-        #expect(marker.perPage == 100)
     }
 
-    /// 標頭整個缺席（中間層剝掉）也當最後一頁——與空字串同義。
+    /// 標頭整個缺席代表被中途拿掉了：站台一定會發這個標頭，最後一頁發的是空字串而非省略。
+    ///
+    /// 靜默當成最後一頁，會讓輪詢每輪只讀一頁、而且回報一切正常——吞吐量無聲崩塌，
+    /// 正是本模組明說不接受的形狀。
     @Test
-    func `absent next page header means last page`() throws {
-        let marker: PageMarker = try .init(response: .init(statusCode: 200, headers: ["X-Page": "1"]), requestedPage: 1)
-        #expect(marker.nextPage == nil)
-        #expect(marker.perPage == nil)
+    func `absent next page header is rejected`() {
+        #expect(throws: GitLabAPIError.self) {
+            try PageMarker(response: .init(statusCode: 200, headers: ["X-Page": "1"]), requestedPage: 1)
+        }
     }
 
     /// 有下一頁時解出頁碼。
@@ -98,13 +100,4 @@ private final class PageMarkerTests {
         }
     }
 
-    /// 站台把 `per_page` 收小時，收小後的值要看得到——它是排查「怎麼一直讀不完」的第一個數字。
-    @Test
-    func `server side per page clamp is visible`() throws {
-        let response: HTTPResponse = .init(
-            statusCode: 200,
-            headers: ["X-Page": "1", "X-Per-Page": "20", "X-Next-Page": "2"]
-        )
-        #expect(try PageMarker(response: response, requestedPage: 1).perPage == 20)
-    }
 }

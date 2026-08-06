@@ -99,6 +99,14 @@ public struct UpdatedAfterCursor: Sendable, Equatable, Hashable, Codable {
         return floored > watermark ? .init(watermark: floored) : self
     }
 
+    /// 這個時刻的秒數是否已越過現行水位——也就是「不看任何上限的話，它推得動水位嗎」。
+    ///
+    /// 供呼叫端分辨兩件外觀相同的事：**本來就沒東西可推進**（讀到的都還在水位那一秒內），
+    /// 與**有東西可推進、卻被上限壓住**。前者是正常的安靜輪次，後者會一直重複下去。
+    public func wouldAdvance(to instant: Date) -> Bool {
+        advanced(to: instant, noLaterThan: .distantFuture) != self
+    }
+
     /// 向下取整到整秒（往更早的方向，含 1970 之前的負值）。
     ///
     /// 用 `.down`（趨向負無限）而非 `.towardZero`：後者對 1970 前的時刻會往「較晚」取整，
