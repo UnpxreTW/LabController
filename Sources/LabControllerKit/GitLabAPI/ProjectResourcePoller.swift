@@ -93,7 +93,14 @@ public struct ProjectResourcePoller: Sendable {
     /// 代價是請求數與重複量等比上升。補大量舊資料而且在意延遲時才值得調。
     public static let defaultPageBudget: Int = 1
 
-    /// 取不到站台時鐘時，本機時鐘往前扣的容差秒數。往前扣的方向只會造成重讀、不會造成漏讀。
+    /// 容許的時鐘分歧秒數；同一個值有兩個用途。
+    ///
+    /// 1. 取不到站台時鐘時，本機時鐘往前扣這麼多當上限。往前扣的方向只會造成重讀、不會造成漏讀。
+    /// 2. 判定站台時鐘與本機時鐘算不算對得上——超過這個差距（再加一個請求逾時）即視為不一致，
+    ///    `ResourcePollResult.capIsTrustworthy` 轉為 `false`。
+    ///
+    /// 兩個用途共用一個值有其副作用：把它調小以減少重讀，同時也把信任窗收窄了，
+    /// 平常的時鐘漂移就足以讓那個旗標長期為 `false`。
     public static let defaultClockSkewAllowance: TimeInterval = 120
 
     /// 單次請求逾時；這類查詢應快速失敗，與 long-poll 的 `jobs/request` 相反。
@@ -119,7 +126,7 @@ public struct ProjectResourcePoller: Sendable {
     /// 實際採用的單輪翻頁上限，至少為 1。
     public let pageBudget: Int
 
-    /// 實際採用的時鐘容差秒數，至少為 0。
+    /// 實際採用的時鐘容差秒數，至少為 0。兩個用途見 `defaultClockSkewAllowance`。
     public let clockSkewAllowance: TimeInterval
 
     /// 傳輸層；正式路徑用 `URLSessionTransport`、測試注入假傳輸。
@@ -250,21 +257,23 @@ public struct ProjectResourcePoller: Sendable {
         // 把那種情況也報成 stalled，會讓完全正常的站台每有一筆剛發生的異動就誤報一次，
         // 而 stalled 一旦開始誤報就沒有人會再認真看它。
         //
-        // 但「來自站台」不等於「堪用」：前端快取或時鐘停住的節點會發出固定或過期的 `Date`，
-        // 上限就此凍住、游標永遠不動，而每輪都回報一切正常。因此拿它跟本機時鐘對一次。
+        // 兩個時鐘對不對得上——**只知道它們不一致，不知道是哪一邊錯**。
         //
-        // 對比的兩端都必須取自**同一個瞬間附近**：用第一個請求送出前的本機讀值（`walkSentAtWallClock`）
-        // 對上由第一個回應導出的上限。拿走完所有頁之後的時刻去比，會把整趟翻頁的耗時全記成時鐘分歧，
-        // 於是「補舊資料所以調高翻頁預算」本身就會誤報。
-        //
-        // 取絕對值：站台時鐘**走在本機之前**那一側同樣要攔——上限落到未來等於上限不存在，
-        // 而那是會無聲漏資料的方向，只比單邊等於放過它。那一側不會表現成 stalled（上限落在未來時
-        // 游標照樣推得動），而是由 `ResourcePollResult.capIsTrustworthy` 帶出去。
-        // 容差之外再放一個請求逾時：兩端本來就隔著一次來回，加上 `Date` 標頭只有整秒精度。
-        let capIsUnusable: Bool = usedFallbackStart || abs(
+        // 對比的兩端都取自同一個瞬間附近：第一個請求送出前的本機讀值對上由第一個回應導出的上限。
+        // 拿走完所有頁之後的時刻去比，會把整趟翻頁的耗時全記成分歧，「補舊資料所以調高翻頁預算」
+        // 本身就會誤報。取絕對值是因為兩個方向都要知道：上限落到未來等於上限不存在，
+        // 落到過去則可能把游標壓住。容差之外再放一個請求逾時：兩端本來就隔著一次來回，
+        // 加上 `Date` 標頭只有整秒精度。
+        let clocksDisagree: Bool = abs(
             (walkSentAtWallClock ?? localClock()).timeIntervalSince(startedAt)
         ) > clockSkewAllowance + Self.requestTimeout
-        let cappedByUnusableClock: Bool = firstPageWouldAdvance && capIsUnusable
+        // ⚠ 時鐘不一致**不拿來判 stalled**。這個比較分不出是站台錯還是本機錯，而本機時鐘偏掉時
+        // 站台完全正常、下一輪照樣推得動——報成「不會自己好」的 stalled 就是誤報，
+        // 而這個狀態一旦開始誤報就沒有人會再認真看它。它只影響 `capIsTrustworthy`。
+        //
+        // 真正會一直卡住的是另一件事：**根本沒有站台時鐘可用**。此時上限完全建立在本機時鐘上，
+        // 本機時鐘落後站台就會一路壓住游標，而且沒有任何東西會把它拉回來。
+        let cappedByUnusableClock: Bool = firstPageWouldAdvance && usedFallbackStart
         let completion: PollCompletion = Self.completion(
             isTruncated: isTruncated,
             didAdvance: advanced != cursor,
@@ -274,7 +283,7 @@ public struct ProjectResourcePoller: Sendable {
             elements: elements,
             cursor: advanced,
             completion: completion,
-            capIsTrustworthy: !capIsUnusable
+            capIsTrustworthy: !usedFallbackStart && !clocksDisagree
         )
     }
 

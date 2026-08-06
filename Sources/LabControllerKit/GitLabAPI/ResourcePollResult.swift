@@ -36,6 +36,10 @@ public struct ResourcePollResult<Element: Sendable>: Sendable {
     ///
     /// 為 `false` 的兩種情況：回應沒有可解析的 `Date` 標頭（只能退回本機時鐘、無從查核），
     /// 或有標頭但與本機時鐘差距超過容差。兩者都代表**這一輪的上限不該被當成保護**。
+    ///
+    /// ⚠ 它**不指認是誰的錯**：這個判定只知道兩個時鐘對不上，站台端與本機端都可能是原因，
+    /// 兩邊都要查。也因此它不會讓本輪被判成 `PollCompletion.stalled`——本機時鐘偏掉時站台完全正常，
+    /// 那不是「不會自己好」的狀態。
     public let capIsTrustworthy: Bool
 
     /// 以顯式欄位建立。

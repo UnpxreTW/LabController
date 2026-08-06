@@ -317,8 +317,8 @@ private final class ProjectResourcePollerCursorTests {
     func `an empty first page never counts as a tie group`() async throws {
         let transport: PollScriptedTransport = .init([
             pollPageResponse("[]", page: 1, nextPage: 2),
-            // 第二頁那筆刻意留在游標那一秒內：否則「看到越過游標的資源」這條就會先成立，
-            // 空第一頁的偵測根本不會被執行到，刪掉它測試也不會轉紅。
+            // 第二頁那筆的時刻不影響結果——輪詢器不看第二頁以後的時間戳。留在游標那一秒內是為了
+            // 讓 fixture 只表達「第一頁是空的、後面還有頁」這一件事。
             pollPageResponse(#"[{"id":1,"updated_at":"2026-08-06T09:00:00.500Z"}]"#, page: 2, nextPage: nil),
         ])
         let poller: ProjectResourcePoller = .init(

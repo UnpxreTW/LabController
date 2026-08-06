@@ -75,10 +75,10 @@ private final class ProjectResourcePollerClockTests {
         #expect(result.capIsTrustworthy)
     }
 
-    /// 站台 `Date` 標頭停住不走（前端快取、時鐘卡死的節點）時，上限就此凍住、游標永遠不動，
-    /// 而每輪都會回報一切正常。「來自站台」不等於「堪用」——與本機時鐘差距超過容差即視為不堪用。
+    /// 時鐘分歧**不得**讓本輪被判成 `stalled`：這個比較分不出是站台錯還是本機錯，
+    /// 而本機時鐘偏掉時站台完全正常、下一輪照樣推得動。它只該讓 `capIsTrustworthy` 轉為 `false`。
     @Test
-    func `a server clock far behind the local clock is treated as unusable`() async throws {
+    func `clock disagreement lowers trust without reporting a stall`() async throws {
         let transport: PollScriptedTransport = .init([
             pollPageResponse(
                 #"[{"id":1,"updated_at":"2026-08-06T09:00:20Z"}]"#,
@@ -104,7 +104,8 @@ private final class ProjectResourcePollerClockTests {
             cursor: cursor
         )
         #expect(result.cursor == cursor)
-        #expect(result.completion == .stalled)
+        #expect(!result.capIsTrustworthy)
+        #expect(result.completion != .stalled)
     }
 
     /// 反例配對：上限來自站台 `Date` 標頭而壓住游標時，**不算卡住**。
@@ -263,6 +264,8 @@ private final class ProjectResourcePollerClockTests {
         )
         // 本機時鐘 09:10:00 扣 120 秒＝09:08:00，早於資源的 09:09:00 → 以容差後的時刻封頂。
         #expect(result.cursor.watermark == Date(timeIntervalSince1970: pollReference + 480))
+        // 沒有站台時鐘可對，上限完全建立在本機時鐘上——無從查核，一律不可信。
+        #expect(!result.capIsTrustworthy)
     }
 
     /// 空集合不推進游標：沒讀到東西不代表那段時間沒有東西被改過。
