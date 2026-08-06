@@ -75,6 +75,108 @@ private final class ProjectResourcePollerClockTests {
         #expect(result.capIsTrustworthy)
     }
 
+    /// 退回本機時鐘那條路，讀值必須取自**請求送出之前**。
+    ///
+    /// 取自回應回來之後，上限就晚了一整個請求的時間；那段期間提交、時間戳卻更早的資源會沉到水位之下。
+    /// 這裡讓時鐘在請求進行中前進 25 秒，讀值取錯邊就會表現成水位多走 25 秒。
+    @Test
+    func `the fallback clock is read before the request goes out`() async throws {
+        let ticks: Mutex<Int> = .init(0)
+        let transport: PollScriptedTransport = .init(
+            [
+                pollPageResponse(
+                    #"[{"id":1,"updated_at":"2026-08-06T09:05:00Z"}]"#,
+                    page: 1,
+                    nextPage: nil,
+                    serverDate: nil
+                ),
+            ],
+            onSend: { ticks.withLock { $0 += 1 } }
+        )
+        let poller: ProjectResourcePoller = .init(
+            transport: transport,
+            clockSkewAllowance: 0,
+            // 送出前讀到 09:00:00，請求進行中時鐘前進到 09:00:25。
+            localClock: { .init(timeIntervalSince1970: pollReference + Double(ticks.withLock { $0 }) * 25) }
+        )
+        let result: ResourcePollResult<PollSyntheticResource> = try await poller.poll(
+            host: "https://gitlab.example.com",
+            projectIdentifier: "42",
+            collection: .mergeRequests,
+            privateToken: "synthetic-read-token",
+            cursor: .init()
+        )
+        #expect(result.cursor.watermark == Date(timeIntervalSince1970: pollReference))
+    }
+
+    /// 時鐘比對的兩端只取自**第一個**請求；整趟翻頁的耗時不得被記成時鐘分歧。
+    ///
+    /// 這裡讓本機時鐘每頁前進 60 秒、走五頁（合計 240 秒，遠超容差＋逾時），兩邊時鐘其實完全一致——
+    /// 若比對端改成逐頁刷新，可信旗標就會在完全健康的站台上翻成 false。
+    @Test
+    func `a long walk does not count as clock disagreement`() async throws {
+        let ticks: Mutex<Int> = .init(0)
+        let pages: [HTTPResponse] = (1...5).map { page in
+            pollPageResponse(
+                #"[{"id":1,"updated_at":"2026-08-06T09:00:05Z"}]"#,
+                page: page,
+                nextPage: page == 5 ? nil : page + 1,
+                serverDate: "Thu, 06 Aug 2026 09:00:00 GMT"
+            )
+        }
+        let transport: PollScriptedTransport = .init(pages, onSend: { ticks.withLock { $0 += 1 } })
+        let poller: ProjectResourcePoller = .init(
+            transport: transport,
+            pageBudget: 5,
+            clockSkewAllowance: 120,
+            localClock: { .init(timeIntervalSince1970: pollReference + Double(ticks.withLock { $0 }) * 60) }
+        )
+        let result: ResourcePollResult<PollSyntheticResource> = try await poller.poll(
+            host: "https://gitlab.example.com",
+            projectIdentifier: "42",
+            collection: .mergeRequests,
+            privateToken: "synthetic-read-token",
+            cursor: .init()
+        )
+        #expect(result.capIsTrustworthy)
+        #expect(transport.requests.withLock { $0.count } == 5)
+    }
+
+    /// 容差之外要再放一個請求逾時的鬆動：兩端本來就隔著一次來回，而 `Date` 標頭只有整秒精度。
+    ///
+    /// 容差設 0（合法值）時若少了那段鬆動，完全同步的站台每一輪都會被判成時鐘不一致。
+    @Test
+    func `a sub second offset is not clock disagreement even at zero allowance`() async throws {
+        let transport: PollScriptedTransport = .init([
+            pollPageResponse(
+                #"[{"id":1,"updated_at":"2026-08-06T09:00:20Z"}]"#,
+                page: 1,
+                nextPage: nil,
+                // 站台在 09:00:30.9 產生回應，標頭整秒截斷成 09:00:30。
+                serverDate: "Thu, 06 Aug 2026 09:00:30 GMT"
+            ),
+        ])
+        let frozen: ContinuousClock.Instant = .now
+        let poller: ProjectResourcePoller = .init(
+            transport: transport,
+            clockSkewAllowance: 0,
+            localClock: { .init(timeIntervalSince1970: pollReference + 30.9) },
+            monotonicNow: { frozen }
+        )
+        let result: ResourcePollResult<PollSyntheticResource> = try await poller.poll(
+            host: "https://gitlab.example.com",
+            projectIdentifier: "42",
+            collection: .mergeRequests,
+            privateToken: "synthetic-read-token",
+            cursor: .init()
+        )
+        #expect(result.capIsTrustworthy)
+    }
+
+}
+
+private final class ProjectResourcePollerStallTests {
+
     /// 時鐘分歧**不得**讓本輪被判成 `stalled`：這個比較分不出是站台錯還是本機錯，
     /// 而本機時鐘偏掉時站台完全正常、下一輪照樣推得動。它只該讓 `capIsTrustworthy` 轉為 `false`。
     @Test

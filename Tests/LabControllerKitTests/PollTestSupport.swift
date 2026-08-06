@@ -27,13 +27,18 @@ final class PollScriptedTransport: HTTPTransport, Sendable {
     /// 尚未送出的回應。
     private let pending: Mutex<[HTTPResponse]>
 
+    /// 每次 `send` 進來時先跑一次；供測試在「請求進行中」推進注入的時鐘。
+    private let onSend: @Sendable () -> Void
+
     /// 以回應腳本建立。
-    init(_ responses: [HTTPResponse]) {
+    init(_ responses: [HTTPResponse], onSend: @escaping @Sendable () -> Void = {}) {
         self.pending = .init(responses)
+        self.onSend = onSend
     }
 
     /// 記錄請求後回覆腳本中的下一個回應。
     func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+        onSend()
         requests.withLock { $0.append(request) }
         return try pending.withLock { queue in
             guard !queue.isEmpty else {
