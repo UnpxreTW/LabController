@@ -38,23 +38,23 @@ import Foundation
 /// 排序方向因此不是偏好而是前提：`desc` 會把剛改動的資源放到第一頁（已讀過的方向），
 /// 且第一頁的最大值是全集最大值，游標一次就跳到最前面，跨過的全部都讀不回來。
 ///
-/// ### 唯一的例外：同秒群塞滿第一頁
+/// ### 會卡住的邊角：同秒群塞滿第一頁
 ///
-/// 上面的規則有一個會卡死的邊角：**若同一秒的資源多到把第一頁塞滿**（一次交易批次改動、匯入），
-/// 第一頁的最大值取整後就等於現行游標，游標永遠推不動。那不只是原地踏步——同一批資源會每一輪
-/// 重新交出去一次，而且比它們新的資源永遠排在後面，多到超過翻頁預算時就再也讀不到，
-/// **從重複變成真正的遺漏**。
+/// 上面的規則有一個推不動的形狀：**若同一秒的資源多到把第一頁塞滿**（一次交易批次改動、匯入），
+/// 第一頁的最大值取整後就等於現行游標，游標不會動，下一輪讀到一模一樣的內容。
 ///
-/// 因此當第一頁整頁落在游標那一秒內、而且本輪確實讀到了秒數已越過游標的資源（＝這個同秒群在讀到的
-/// 頁數之內結束了）時，游標**往前跨整整一秒**，不多跨。
+/// 本型別**不會自作主張跨過去**，而是回報 `PollCompletion.stalled`。理由是「跨過去」在這個 API 形狀下
+/// 無法做得安全：要跨就得先確定那一秒已經讀完，而唯一的證據只能來自第二頁以後——那正是不可採信的
+/// 位置。更根本的是，站台對 `updated_at` 沒有第二排序鍵，**時間戳完全相同的資源在不同次請求之間
+/// 順序未定**；同一群 tied 資源可能每次請求都回不同的子集合，於是「第二頁出現了更新的資源」
+/// 完全不能推論成「那一秒讀完了」。照那個推論跨過去，沒在任何一頁露過面的 tied 資源就此沉到水位之下、
+/// 永遠讀不到——實測 250 筆同時刻資源、翻頁期間零改動，仍有 22 筆從此消失。
 ///
-/// 跨的距離刻意寫死一秒、而不是跨到那筆觀察到的資源：那筆來自第二頁以後，正是不可採信的位置。
-/// 位移一旦發生，第二頁的起點可能落在很後面（實測可達數十秒乃至跨日），跨過去等於把中間那整段
-/// 一次沉到水位之下。跨一秒則把曝險**關在那一秒之內**：只有該秒內、且在翻頁期間被移動或刪除的資源
-/// 可能漏掉，該秒之後的一切下一輪都還讀得到。
+/// 因此本層的選擇是：**卡住但出聲，絕不用會漏資料的方式製造進度**。卡住期間資料仍在游標之上、
+/// 一筆都沒丟，換個做法就讀得回來；跨過去丟掉的則沒有任何一層會發現。
 ///
-/// 結果會以 `ResourcePollResult.crossedOversizedTie` 標出來。若同秒群連結束都還沒讀到
-/// （整輪預算都還在同一秒內），游標維持不動並回報 `PollCompletion.stalled`——絕不跳過沒讀到的成員。
+/// 要真正解開這個形狀，需要一層握有去重狀態的呼叫端——它知道哪些已經處理過，才有依據決定
+/// 「這批我全看過了，可以往前」。那個決定不屬於這一層。
 ///
 /// ## 上限：不晚於本輪起始的站台時鐘
 ///
@@ -67,9 +67,8 @@ import Foundation
 ///   之後才提交的資料。它對本輪不可見，時間戳卻可能已落在新游標之下，於是永遠查不到。站台時鐘那道
 ///   上限**擋不住這種情況**（它只保證「本輪期間才寫入」的資料下一輪還在範圍內）。真正的解是讓游標
 ///   固定落後一段安全距離；該距離取多少取決於站台的交易時長，本片沒有依據可訂，留給接上儲存層時決定。
-/// - 站台的位移分頁在 `updated_at` 上沒有第二排序鍵。上面「只信第一頁」的規則不受此影響，
-///   但同一秒內的資源筆數若超過一頁，第一頁就切在平手群中間；此時整秒重讀（見 `UpdatedAfterCursor`）
-///   是唯一的保護。
+/// - **同一秒的資源多到塞滿第一頁時輪詢會卡住**（見上一節）。卡住期間一筆資料都不會丟，
+///   但游標也不會前進，比那一秒新的資源若超出翻頁預算就讀不到。解開它需要去重狀態，不在本層。
 /// - 未處理站台的速率限制回應（429）；目前一律當非預期狀態碼拋出。
 public struct ProjectResourcePoller: Sendable {
 
@@ -150,7 +149,7 @@ public struct ProjectResourcePoller: Sendable {
         let decoder: JSONDecoder = Self.makeResourceDecoder()
         var elements: [Element] = []
         var firstPageMaximum: Date?
-        var earliestBeyondCursor: Date?
+        var sawResourceBeyondCursor: Bool = false
         var walkStartedAt: Date?
         var page: Int = 1
         var pagesRead: Int = 0
@@ -185,9 +184,9 @@ public struct ProjectResourcePoller: Sendable {
             if pagesRead == 0 {
                 firstPageMaximum = batch.map(\.updatedAt).max()
             }
-            for element: Element in batch where cursor.wouldAdvance(to: element.updatedAt) {
-                earliestBeyondCursor = min(earliestBeyondCursor ?? element.updatedAt, element.updatedAt)
-            }
+            // 只記「有沒有」、不記是哪一筆：它唯一的用途是分辨卡住與安靜，**不是**推進依據。
+            // 留著一個最小值會讓下一個人以為游標可以推到那裡去，而那正是會漏資料的做法。
+            sawResourceBeyondCursor = sawResourceBeyondCursor || batch.contains { cursor.wouldAdvance(to: $0.updatedAt) }
             pagesRead += 1
             guard let nextPage: Int = marker.nextPage else {
                 break
@@ -199,39 +198,17 @@ public struct ProjectResourcePoller: Sendable {
             page = nextPage
         }
         let startedAt: Date = walkStartedAt ?? fallbackStartTime()
-        var advanced: UpdatedAfterCursor = cursor.advanced(to: firstPageMaximum, noLaterThan: startedAt)
-        // 卡在同秒群的三個條件缺一不可：第一頁**有資料**、整頁落在游標那一秒內、且後面還有頁。
-        // 「第一頁有資料」不可省——空的第一頁配上下一頁指標是異常，此時沒有任何第一頁證據可依據。
-        let isWedgedOnTie: Bool = pagesRead > 1 && firstPageMaximum.map { !cursor.wouldAdvance(to: $0) } ?? false
-        var crossedOversizedTie: Bool = false
-        // 跨過去的前提是「這個同秒群確實在讀到的頁數之內結束了」——看到秒數已越過游標的資源才算數；
-        // 沒看到就代表群還沒讀完，往前一步就會跳過沒讀到的成員。
-        if isWedgedOnTie, earliestBeyondCursor != nil, let watermark: Date = cursor.watermark {
-            // 只跨一秒，**不跨到觀察值**。觀察值來自第二頁以後、不可採信，跨過去等於把
-            // 「只採信第一頁」的保護整段丟掉：位移一發生，第二頁的起點就可能落在很後面，
-            // 中間那段會一次全部沉到水位之下。跨一秒則把曝險關在那一秒之內。
-            let escaped: UpdatedAfterCursor = cursor.advanced(
-                to: watermark.addingTimeInterval(1),
-                noLaterThan: startedAt
-            )
-            crossedOversizedTie = escaped != cursor
-            advanced = escaped
-        }
+        let advanced: UpdatedAfterCursor = cursor.advanced(to: firstPageMaximum, noLaterThan: startedAt)
         // 沒有上限時本來會不會動？用來分辨「本來就沒東西可推進」與「有東西、卻推不動」。
-        // 後者含兩種：被時鐘上限壓住，以及看到了越過游標的資源卻不在可採信的位置上。
+        // 後者含三種：被時鐘上限壓住、同秒群塞滿第一頁、以及第一頁是空的卻還有下一頁。
         let hadRoomToAdvance: Bool = (firstPageMaximum.map(cursor.wouldAdvance) ?? false)
-            || (earliestBeyondCursor.map(cursor.wouldAdvance) ?? false)
+            || sawResourceBeyondCursor
         let completion: PollCompletion = Self.completion(
             isTruncated: isTruncated,
             didAdvance: advanced != cursor,
             hadRoomToAdvance: hadRoomToAdvance
         )
-        return .init(
-            elements: elements,
-            cursor: advanced,
-            completion: completion,
-            crossedOversizedTie: crossedOversizedTie
-        )
+        return .init(elements: elements, cursor: advanced, completion: completion)
     }
 
     /// 產生本模組解 GitLab 資源用的解碼器。
@@ -341,7 +318,12 @@ public struct ProjectResourcePoller: Sendable {
               Self.acceptedSchemes.contains(scheme.lowercased()),
               components.host?.isEmpty == false,
               components.query == nil,
-              components.fragment == nil else {
+              components.fragment == nil,
+              // userinfo 必須擋：`https://gitlab.example.com@elsewhere.example` 會解析成
+              // host 為 elsewhere.example、使用者名稱為前半段，看起來像自家站台，
+              // 讀取憑證卻會連同 PRIVATE-TOKEN 標頭一起送到別人家。
+              components.user == nil,
+              components.password == nil else {
             throw GitLabAPIError.invalidURL(host)
         }
         // 修掉結尾**所有**斜線：只修一個的話 `…example.com//` 會組出 `//api/v4/…`，路徑多一層空片段。

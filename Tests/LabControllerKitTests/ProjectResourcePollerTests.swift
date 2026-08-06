@@ -326,12 +326,13 @@ private final class ProjectResourcePollerCursorTests {
         #expect(result.cursor == cursor)
     }
 
-    /// 同一秒的資源塞滿第一頁時，游標改跨到「秒數已越過游標的最早一筆」，而不是永遠卡在原地。
+    /// 同一秒的資源塞滿第一頁時，游標推不動——**不自作主張跨過去**，改回報 `stalled`。
     ///
-    /// 卡住不只是原地踏步：同一批資源會每輪重新交出去一次，而比它們新的資源永遠排在後面，
-    /// 多到超過翻頁預算就再也讀不到——從重複變成真正的遺漏。
+    /// 跨過去需要「那一秒已讀完」的證據，而唯一的來源是第二頁以後；站台對 `updated_at` 沒有第二排序鍵，
+    /// 時間戳相同的資源在不同次請求之間順序未定，所以那個證據推論不成立。照它跨過去，
+    /// 沒露過面的同時刻資源就此沉到水位之下、永遠讀不到。卡住則一筆都沒丟。
     @Test
-    func `an oversized tie group on the first page is crossed`() async throws {
+    func `an oversized tie group on the first page stalls instead of being crossed`() async throws {
         let transport: ScriptedTransport = .init([
             pageResponse(
                 #"[{"id":1,"updated_at":"2026-08-06T09:00:00.100Z"},{"id":2,"updated_at":"2026-08-06T09:00:00.900Z"}]"#,
@@ -354,11 +355,10 @@ private final class ProjectResourcePollerCursorTests {
             privateToken: "synthetic-read-token",
             cursor: cursor
         )
-        // 只跨一秒：推到 09:00:01，**不是**第二頁起點的 09:00:20。跨到觀察值會把
-        // 09:00:01–09:00:20 之間的一切一次沉到水位之下，而那段正是位移最可能吃掉東西的地方。
-        #expect(result.cursor.watermark == Date(timeIntervalSince1970: reference + 1))
-        #expect(result.crossedOversizedTie)
-        #expect(result.completion == .complete)
+        #expect(result.cursor == cursor)
+        #expect(result.completion == .stalled)
+        // 卡住不等於不交件：讀到的資源照樣全數交出去。
+        #expect(result.elements.map(\.identifier) == [1, 2, 3, 4])
     }
 
     /// 整輪預算都還在同一秒內：跨不出去，游標維持不動並報 `stalled`——絕不硬跳過還沒讀到的同秒資源。
@@ -379,7 +379,6 @@ private final class ProjectResourcePollerCursorTests {
         )
         #expect(result.completion == .stalled)
         #expect(result.cursor == cursor)
-        #expect(!result.crossedOversizedTie)
     }
 
     /// 第一頁是空的卻還有下一頁：那是異常，**不是**同秒群。此時沒有任何第一頁證據，游標不得憑第二頁前進。
@@ -402,14 +401,13 @@ private final class ProjectResourcePollerCursorTests {
             cursor: cursor
         )
         #expect(result.cursor == cursor)
-        #expect(!result.crossedOversizedTie)
         // 有東西越過了游標、卻不在可採信的位置上：不推進，但要出聲。
         #expect(result.completion == .stalled)
     }
 
-    /// 反例配對：第一頁的最大值本來就推得動游標時，不算跨同秒群，旗標維持關閉。
+    /// 反例配對：第一頁的最大值本來就推得動游標時，一切照常、不算卡住。
     @Test
-    func `a normal multi page walk does not report crossing a tie`() async throws {
+    func `a normal multi page walk is not a stall`() async throws {
         let transport: ScriptedTransport = .init([
             pageResponse(#"[{"id":1,"updated_at":"2026-08-06T09:00:05Z"}]"#, page: 1, nextPage: 2),
             pageResponse(#"[{"id":2,"updated_at":"2026-08-06T09:00:20Z"}]"#, page: 2, nextPage: nil),
@@ -422,7 +420,7 @@ private final class ProjectResourcePollerCursorTests {
             privateToken: "synthetic-read-token",
             cursor: .init(watermark: .init(timeIntervalSince1970: reference))
         )
-        #expect(!result.crossedOversizedTie)
+        #expect(result.completion == .complete)
         #expect(result.cursor.watermark == Date(timeIntervalSince1970: reference + 5))
     }
 
@@ -670,6 +668,26 @@ private final class ProjectResourcePollerFailureTests {
             }
             #expect(transport.requests.withLock { $0.isEmpty })
         }
+    }
+
+    /// host 帶 userinfo 時必須擋下：那會把讀取憑證送到別人家。
+    ///
+    /// `https://gitlab.example.com@elsewhere.example` 解析後的 host 是 `elsewhere.example`、
+    /// 前半段成了使用者名稱——字串看起來像自家站台，`PRIVATE-TOKEN` 標頭卻會連同請求一起送過去。
+    @Test
+    func `host carrying userinfo is rejected`() async {
+        let transport: ScriptedTransport = .init([])
+        let poller: ProjectResourcePoller = .init(transport: transport)
+        await #expect(throws: GitLabAPIError.self) {
+            let _: ResourcePollResult<SyntheticResource> = try await poller.poll(
+                host: "https://gitlab.example.com@elsewhere.example",
+                projectIdentifier: "42",
+                collection: .issues,
+                privateToken: "synthetic-read-token",
+                cursor: .init()
+            )
+        }
+        #expect(transport.requests.withLock { $0.isEmpty })
     }
 
     /// host 帶路徑前綴（反向代理掛在子路徑下）時保留該前綴，且結尾多重斜線一併修掉。
