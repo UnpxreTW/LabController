@@ -13,6 +13,68 @@ import Testing
 
 private final class ProjectResourcePollerClockTests {
 
+    /// 上限落在未來時，游標**照樣推得動**、本輪照樣 `complete`——上限等於不存在，卻沒有任何跡象。
+    ///
+    /// 那正是會漏資料的方向：本輪查詢快照之後才提交、時間戳卻更早的資源會沉到水位之下。
+    /// 因此這件事不能靠 `completion` 表達（那個列舉在游標動得了時根本不看），改由旗標帶出去。
+    @Test
+    func `a cap in the future is reported as untrustworthy while the cursor still advances`() async throws {
+        let transport: PollScriptedTransport = .init([
+            pollPageResponse(
+                #"[{"id":1,"updated_at":"2026-08-06T09:00:20Z"}]"#,
+                page: 1,
+                nextPage: nil,
+                // 前置代理時鐘快一小時。
+                serverDate: "Thu, 06 Aug 2026 10:00:30 GMT"
+            ),
+        ])
+        let frozen: ContinuousClock.Instant = .now
+        let poller: ProjectResourcePoller = .init(
+            transport: transport,
+            clockSkewAllowance: 120,
+            localClock: { .init(timeIntervalSince1970: pollReference + 20) },
+            monotonicNow: { frozen }
+        )
+        let result: ResourcePollResult<PollSyntheticResource> = try await poller.poll(
+            host: "https://gitlab.example.com",
+            projectIdentifier: "42",
+            collection: .mergeRequests,
+            privateToken: "synthetic-read-token",
+            cursor: .init(watermark: .init(timeIntervalSince1970: pollReference + 10))
+        )
+        #expect(result.completion == .complete)
+        #expect(result.cursor.watermark == Date(timeIntervalSince1970: pollReference + 20))
+        #expect(!result.capIsTrustworthy)
+    }
+
+    /// 反例配對：兩邊時鐘對得上時，上限可信。少了這一半就分不出旗標是不是恆為 false。
+    @Test
+    func `a cap from an agreeing clock is trustworthy`() async throws {
+        let transport: PollScriptedTransport = .init([
+            pollPageResponse(
+                #"[{"id":1,"updated_at":"2026-08-06T09:00:20Z"}]"#,
+                page: 1,
+                nextPage: nil,
+                serverDate: "Thu, 06 Aug 2026 09:00:30 GMT"
+            ),
+        ])
+        let frozen: ContinuousClock.Instant = .now
+        let poller: ProjectResourcePoller = .init(
+            transport: transport,
+            clockSkewAllowance: 120,
+            localClock: { .init(timeIntervalSince1970: pollReference + 30) },
+            monotonicNow: { frozen }
+        )
+        let result: ResourcePollResult<PollSyntheticResource> = try await poller.poll(
+            host: "https://gitlab.example.com",
+            projectIdentifier: "42",
+            collection: .mergeRequests,
+            privateToken: "synthetic-read-token",
+            cursor: .init(watermark: .init(timeIntervalSince1970: pollReference + 10))
+        )
+        #expect(result.capIsTrustworthy)
+    }
+
     /// 站台 `Date` 標頭停住不走（前端快取、時鐘卡死的節點）時，上限就此凍住、游標永遠不動，
     /// 而每輪都會回報一切正常。「來自站台」不等於「堪用」——與本機時鐘差距超過容差即視為不堪用。
     @Test

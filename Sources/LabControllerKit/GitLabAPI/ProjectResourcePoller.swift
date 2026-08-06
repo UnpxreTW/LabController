@@ -63,6 +63,9 @@ import Foundation
 ///
 /// ## 已知缺口
 ///
+/// - **後面某一頁解不開會作廢整輪**：解碼失敗以拋錯表達，於是第一頁明明已經讀好、游標本來可以前進，
+///   也一併作廢；下一輪重讀、再撞同一頁，偵測就此停擺直到有人處理。目前選擇讓它出聲而非默默吞掉，
+///   但「保留已解出的頁與第一頁游標、把錯誤當成結果的一部分帶出去」是更好的形狀，留給接上儲存層時改。
 /// - **提交順序與時間戳順序不一致**：資料庫可能存在一筆 `updated_at` 寫成較早時刻、但交易在我們查詢
 ///   之後才提交的資料。它對本輪不可見，時間戳卻可能已落在新游標之下，於是永遠查不到。站台時鐘那道
 ///   上限**擋不住這種情況**（它只保證「本輪期間才寫入」的資料下一輪還在範圍內）。真正的解是讓游標
@@ -255,7 +258,8 @@ public struct ProjectResourcePoller: Sendable {
         // 於是「補舊資料所以調高翻頁預算」本身就會誤報。
         //
         // 取絕對值：站台時鐘**走在本機之前**那一側同樣要攔——上限落到未來等於上限不存在，
-        // 而那是會無聲漏資料的方向，只比單邊等於放過它。
+        // 而那是會無聲漏資料的方向，只比單邊等於放過它。那一側不會表現成 stalled（上限落在未來時
+        // 游標照樣推得動），而是由 `ResourcePollResult.capIsTrustworthy` 帶出去。
         // 容差之外再放一個請求逾時：兩端本來就隔著一次來回，加上 `Date` 標頭只有整秒精度。
         let capIsUnusable: Bool = usedFallbackStart || abs(
             (walkSentAtWallClock ?? localClock()).timeIntervalSince(startedAt)
@@ -266,7 +270,12 @@ public struct ProjectResourcePoller: Sendable {
             didAdvance: advanced != cursor,
             willRepeat: wedgedOnTie || firstPageEmptyWithMore || cappedByUnusableClock
         )
-        return .init(elements: elements, cursor: advanced, completion: completion)
+        return .init(
+            elements: elements,
+            cursor: advanced,
+            completion: completion,
+            capIsTrustworthy: !capIsUnusable
+        )
     }
 
     /// 產生本模組解 GitLab 資源用的解碼器。

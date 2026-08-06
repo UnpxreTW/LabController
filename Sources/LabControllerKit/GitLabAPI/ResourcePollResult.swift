@@ -27,10 +27,27 @@ public struct ResourcePollResult<Element: Sendable>: Sendable {
     /// 本輪走到哪裡收尾。
     public let completion: PollCompletion
 
+    /// 本輪用來封頂游標的時刻可不可信。
+    ///
+    /// 與 `completion` 分開，是因為**不可信的上限未必會擋住游標**：上限若落在未來（前置代理時鐘走快、
+    /// 快取發出指向未來的 `Date`），游標照樣推得動、本輪照樣 `complete`——上限等於不存在，
+    /// 卻沒有任何跡象。而那正是會漏資料的方向：本輪查詢快照之後才提交、時間戳卻更早的資源會沉到水位之下。
+    /// 把它併進 `completion` 就永遠報不出來，因為那個列舉在游標動得了時不看這一項。
+    ///
+    /// 為 `false` 的兩種情況：回應沒有可解析的 `Date` 標頭（只能退回本機時鐘、無從查核），
+    /// 或有標頭但與本機時鐘差距超過容差。兩者都代表**這一輪的上限不該被當成保護**。
+    public let capIsTrustworthy: Bool
+
     /// 以顯式欄位建立。
-    public init(elements: [Element], cursor: UpdatedAfterCursor, completion: PollCompletion) {
+    public init(
+        elements: [Element],
+        cursor: UpdatedAfterCursor,
+        completion: PollCompletion,
+        capIsTrustworthy: Bool = true
+    ) {
         self.elements = elements
         self.cursor = cursor
         self.completion = completion
+        self.capIsTrustworthy = capIsTrustworthy
     }
 }
