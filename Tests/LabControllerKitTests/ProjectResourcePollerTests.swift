@@ -231,8 +231,6 @@ private final class ProjectResourcePollerCursorTests {
         #expect(result.cursor.watermark == Date(timeIntervalSince1970: pollReference + 10))
     }
 
-    /// 有東西可推進、卻被上限壓住而動不了，同樣是會自我重複的狀態，即使沒撞到翻頁預算也要報 `stalled`。
-    ///
     /// 場景：站台沒送 `Date` 標頭、本機時鐘又落後站台一小時 → 起始時刻早於所有資源 → 游標推不動。
     ///
     /// 這件事**不報成 `stalled`**：本輪看不出它會不會自己好（時鐘走著走著上限就追上來了），

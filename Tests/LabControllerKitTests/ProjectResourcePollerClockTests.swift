@@ -162,9 +162,12 @@ private final class ProjectResourcePollerClockTests {
         #expect(result.cursor == cursor)
     }
 
-    /// 撞到預算又推不動游標＝下一輪會讀到一模一樣的內容再撞一次；必須具名為 `stalled`。
+    /// 同秒群塞滿第一頁、而且集合還有後續時報 `stalled`——即使只讀了一頁（預算為 1 也算「還有後續」）。
+    ///
+    /// ⚠ 判 `stalled` 的是同秒群那一條，**不是**「撞到預算」：見下一例，撞到預算而游標只是被上限
+    /// 壓住不到一秒時，回的是 `truncated`。
     @Test
-    func `budget exhausted without cursor progress reports a stall`() async throws {
+    func `a tie filling the first page stalls even when only one page was read`() async throws {
         let transport: PollScriptedTransport = .init([
             pollPageResponse(#"[{"id":1,"updated_at":"2026-08-06T09:00:00.900Z"}]"#, page: 1, nextPage: 2),
         ])
@@ -180,6 +183,40 @@ private final class ProjectResourcePollerClockTests {
         #expect(result.completion == .stalled)
         #expect(result.cursor == cursor)
         #expect(result.elements.count == 1)
+    }
+
+    /// 反例配對：撞到預算、游標也沒動，但原因只是上限比資料晚了不到一秒——回 `truncated`，不是 `stalled`。
+    ///
+    /// `Date` 標頭只有整秒精度，健康站台在 09:00:10.8 發出的就是 `09:00:10`；此時本輪推不動游標，
+    /// 下一輪就推得動。把它報成「不會自己好」的 `stalled`，正是把誤報餵給呼叫端。
+    @Test
+    func `a budget hit with the cursor merely capped reports truncated`() async throws {
+        let transport: PollScriptedTransport = .init([
+            pollPageResponse(
+                #"[{"id":1,"updated_at":"2026-08-06T09:00:11.200Z"}]"#,
+                page: 1,
+                nextPage: 2,
+                serverDate: "Thu, 06 Aug 2026 09:00:10 GMT"
+            ),
+        ])
+        let frozen: ContinuousClock.Instant = .now
+        let poller: ProjectResourcePoller = .init(
+            transport: transport,
+            pageBudget: 1,
+            localClock: { .init(timeIntervalSince1970: pollReference + 10) },
+            monotonicNow: { frozen }
+        )
+        let cursor: UpdatedAfterCursor = .init(watermark: .init(timeIntervalSince1970: pollReference + 10))
+        let result: ResourcePollResult<PollSyntheticResource> = try await poller.poll(
+            host: "https://gitlab.example.com",
+            projectIdentifier: "42",
+            collection: .mergeRequests,
+            privateToken: "synthetic-read-token",
+            cursor: cursor
+        )
+        #expect(result.cursor == cursor)
+        #expect(result.completion == .truncated)
+        #expect(result.capIsTrustworthy)
     }
 
     /// 游標壓在站台時鐘之下：站台回報的時刻比讀到的資源早時，以站台時刻為準。

@@ -109,4 +109,17 @@ private final class PageMarkerTests {
         }
     }
 
+
+    /// 頁碼必須落在能安全加一的範圍內：`Int.max` 會讓「下一頁應為本頁加一」的檢查在算術層當掉，
+    /// 而頁碼是站台與呼叫端各給一半的值，不該由此讓行程結束。
+    @Test
+    func `an unusable page number is rejected before arithmetic`() {
+        let response: HTTPResponse = .init(
+            statusCode: 200,
+            headers: ["X-Page": "9223372036854775807", "X-Next-Page": "1"]
+        )
+        #expect(throws: GitLabAPIError.self) {
+            try PageMarker(response: response, requestedPage: Int.max)
+        }
+    }
 }

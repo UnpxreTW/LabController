@@ -267,7 +267,6 @@ public struct ProjectResourcePoller: Sendable {
         let firstPageEmptyWithMore: Bool = firstPageMaximum == nil && exceedsFirstPage
         let completion: PollCompletion = Self.completion(
             isTruncated: isTruncated,
-            didAdvance: advanced != cursor,
             willRepeat: wedgedOnTie || firstPageEmptyWithMore
         )
         return .init(
@@ -355,15 +354,12 @@ public struct ProjectResourcePoller: Sendable {
         return formatter.date(from: raw)
     }
 
-    /// 由「有沒有撞到預算」「游標動了沒」「會不會重複下去」三者判本輪收尾狀態。
+    /// 由「會不會原封不動再來一次」與「有沒有撞到預算」兩者判本輪收尾狀態。
     ///
-    /// 游標沒動有兩種完全不同的意思。**本來就沒東西可推進**（沒讀到資料，或讀到的都還在游標那一秒內）
-    /// 是正常的安靜輪次；**會原封不動再來一次**則代表下一輪讀到一模一樣的內容、再次沒動，
-    /// 如此反覆而每一輪各自看起來都成功了。後者必須具名為 `stalled`，撞到預算而原地踏步同理。
-    static func completion(isTruncated: Bool, didAdvance: Bool, willRepeat: Bool) -> PollCompletion {
-        // `willRepeat` 是唯一能判 `stalled` 的依據，**撞到預算不算**。
-        // 撞到預算而游標沒動，多半只是上限比資料晚了不到一秒（`Date` 標頭整秒精度所致）——
-        // 那是暫時的，而且「後面還有頁」本來就該用 `truncated` 表達。
+    /// `willRepeat` 是**唯一**能判 `stalled` 的依據——它只收單憑本輪證據就證明得了的形狀
+    /// （見呼叫端）。**撞到預算不算**：那多半只是上限比資料晚了不到一秒（`Date` 標頭整秒精度所致），
+    /// 是暫時的；而「後面還有頁」本來就該用 `truncated` 表達，那個 case 也不宣稱游標動了。
+    static func completion(isTruncated: Bool, willRepeat: Bool) -> PollCompletion {
         if willRepeat {
             return .stalled
         }

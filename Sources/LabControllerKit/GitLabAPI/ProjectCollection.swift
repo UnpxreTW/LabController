@@ -14,6 +14,10 @@
 /// 形狀依據為 GitLab `v16.2.0-ee` 原始碼，逐項對照過而非沿用文件：
 /// `lib/api/helpers/merge_requests_helpers.rb`、`lib/api/issues.rb`、`lib/api/ci/pipelines.rb`
 /// 各自宣告 `updated_after`，`updated_at` 亦在三者的 `order_by` 允許值內。
+///
+/// 三者的 `updated_after` **都是閉區間**（`>=`）：流水線與議題／合併請求走的是同一個
+/// `UpdatedAtFilterable`（`Ci::Pipeline` 明文 include 該 concern，其 scope 以 `gteq` 實作）。
+/// 這件事是 `UpdatedAfterCursor` 整秒取整規則的前提，因此逐一確認過、沒有一個集合是例外。
 public enum ProjectCollection: String, Sendable, CaseIterable {
 
     /// 合併請求：`GET /projects/:id/merge_requests`。
