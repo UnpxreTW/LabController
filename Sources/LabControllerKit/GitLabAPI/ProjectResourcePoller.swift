@@ -97,8 +97,10 @@ public struct ProjectResourcePoller: Sendable {
 
     /// 可接受的網址 scheme。
     ///
-    /// 只檢查「有沒有 scheme」擋不住少寫 scheme 的 host：`gitlab.example.com:7071` 會被解析成
-    /// scheme 為 `gitlab.example.com`、host 為空，一路組成一個送不到任何地方的網址才失敗。
+    /// 這道白名單擋的是**寫得出主機名、scheme 卻不是 HTTP** 的輸入，例如 `ftp://gitlab.example.com`：
+    /// 它通得過主機名那道守衛，若不另外限制 scheme，就會帶著憑證標頭一路交給傳輸層。
+    /// （少寫 scheme 的 `gitlab.example.com:7071` 由主機名守衛擋下——它解析後 host 為 nil，
+    /// 不是被這裡擋的。）
     static let acceptedSchemes: Set<String> = ["http", "https"]
 
     /// 實際採用的每頁筆數，已夾在 `1 ... maximumPageSize`。
@@ -165,13 +167,15 @@ public struct ProjectResourcePoller: Sendable {
         let decoder: JSONDecoder = Self.makeResourceDecoder()
         var elements: [Element] = []
         var firstPageMaximum: Date?
-        var sawResourceBeyondCursor: Bool = false
         var walkStartedAt: Date?
+        var usedFallbackStart: Bool = false
         var page: Int = 1
         var pagesRead: Int = 0
         var isTruncated: Bool = false
         while true {
             let sentAt: ContinuousClock.Instant = monotonicNow()
+            // 退回本機時鐘那條路要用**送出前**的讀值：回應回來之後才讀，上限就晚了一整個來回。
+            let wallSentAt: Date = localClock()
             let response: HTTPResponse = try await send(
                 host: host,
                 projectIdentifier: projectIdentifier,
@@ -190,7 +194,12 @@ public struct ProjectResourcePoller: Sendable {
             // 扣掉單調時鐘量到的來回耗時（純時距、與時鐘域無關）即得一個必定不晚於快照的時刻。
             // 逐頁刷新同樣不行——上限會跟著往後漂，等於沒有上限。
             if walkStartedAt == nil {
-                walkStartedAt = Self.serverTime(of: response)?.addingTimeInterval(-roundTrip) ?? fallbackStartTime()
+                if let serverTime: Date = Self.serverTime(of: response) {
+                    walkStartedAt = serverTime.addingTimeInterval(-roundTrip)
+                } else {
+                    usedFallbackStart = true
+                    walkStartedAt = wallSentAt.addingTimeInterval(-clockSkewAllowance)
+                }
             }
             let batch: [Element]
             do {
@@ -205,9 +214,6 @@ public struct ProjectResourcePoller: Sendable {
             if pagesRead == 0 {
                 firstPageMaximum = batch.map(\.updatedAt).max()
             }
-            // 只記「有沒有」、不記是哪一筆：它唯一的用途是分辨卡住與安靜，**不是**推進依據。
-            // 留著一個最小值會讓下一個人以為游標可以推到那裡去，而那正是會漏資料的做法。
-            sawResourceBeyondCursor = sawResourceBeyondCursor || batch.contains { cursor.wouldAdvance(to: $0.updatedAt) }
             pagesRead += 1
             guard let nextPage: Int = marker.nextPage else {
                 break
@@ -219,17 +225,24 @@ public struct ProjectResourcePoller: Sendable {
             page = nextPage
         }
         // 迴圈至少跑一輪、且在該輪就設定起始時刻，否則早已拋錯離開；`??` 只是讓型別收斂。
-        let startedAt: Date = walkStartedAt ?? fallbackStartTime()
+        let startedAt: Date = walkStartedAt ?? localClock().addingTimeInterval(-clockSkewAllowance)
         let advanced: UpdatedAfterCursor = cursor.advanced(to: firstPageMaximum, noLaterThan: startedAt)
-        // 游標沒動時，下一輪會不會讀到一模一樣的東西？兩個各自獨立的來源：
-        // ①看到了越過游標的資源卻推不動（被時鐘上限壓住，或同秒群塞滿第一頁）；
-        // ②第一頁是空的卻還有下一頁——站台異常，第一頁沒有任何可採信的證據，游標永遠不會動。
-        // ② 不可省：它可能在完全沒有「越過游標的資源」的情況下發生，那時 ① 為假、狀態卻照樣重複。
+        // 游標沒動時，下一輪會不會讀到一模一樣的東西？三種各自獨立、都不會自己好的形狀：
+        let firstPageWouldAdvance: Bool = firstPageMaximum.map(cursor.wouldAdvance) ?? false
+        // ①同秒群塞滿第一頁：第一頁有資料、卻整頁落在游標那一秒內，而後面還有頁。
+        let wedgedOnTie: Bool = firstPageMaximum != nil && !firstPageWouldAdvance && pagesRead > 1
+        // ②第一頁是空的卻還有下一頁：站台異常，第一頁沒有任何可採信的證據。
         let firstPageEmptyWithMore: Bool = firstPageMaximum == nil && pagesRead > 1
+        // ③第一頁本來推得動，卻被上限壓回原位——**只有上限來自本機時鐘那條退路時才算卡住**。
+        // 上限若來自站台 `Date` 標頭，壓住只會是暫時的：那個標頭只有整秒精度、又扣了來回耗時，
+        // 因此系統性地落後真實時刻約一秒；最近一秒內的異動本輪推不動、下一輪就推得動了。
+        // 把那種情況也報成 stalled，會讓完全正常的站台每有一筆剛發生的異動就誤報一次，
+        // 而 stalled 一旦開始誤報就沒有人會再認真看它。
+        let cappedByUnusableClock: Bool = firstPageWouldAdvance && usedFallbackStart
         let completion: PollCompletion = Self.completion(
             isTruncated: isTruncated,
             didAdvance: advanced != cursor,
-            willRepeat: sawResourceBeyondCursor || firstPageEmptyWithMore
+            willRepeat: wedgedOnTie || firstPageEmptyWithMore || cappedByUnusableClock
         )
         return .init(elements: elements, cursor: advanced, completion: completion)
     }
@@ -337,11 +350,6 @@ public struct ProjectResourcePoller: Sendable {
         return "\(scheme)\(host)\(port)"
     }
 
-    /// 取不到站台時鐘時的替代起始時刻：本機時鐘往前扣容差。
-    private func fallbackStartTime() -> Date {
-        localClock().addingTimeInterval(-clockSkewAllowance)
-    }
-
     /// 組出單頁請求並送出。
     private func send(
         host: String,
@@ -355,7 +363,12 @@ public struct ProjectResourcePoller: Sendable {
         unreserved.insert(charactersIn: "-._~")
         // 空專案識別字會組出 `/projects//issues`：請求照樣帶著憑證送出去、站台回 404，
         // 呼叫端看到的是「查無此專案」而不是「參數沒填」。在這裡擋掉才指得出真正的原因。
+        // `.` 與 `..` 全由 unreserved 集合原樣通過，組出帶 dot-segment 的路徑；正規化之後
+        // `/api/v4/projects/../issues` 會變成 `/api/v4/issues`——站台照收，回的是**憑證看得到的所有專案**
+        // 的資料。那不是錯誤、是查詢範圍被無聲換掉。
+        let segments: [Substring] = projectIdentifier.split(separator: "/", omittingEmptySubsequences: false)
         guard !projectIdentifier.isEmpty,
+              !segments.contains(where: { $0 == "." || $0 == ".." }),
               let identifier: String = projectIdentifier.addingPercentEncoding(withAllowedCharacters: unreserved) else {
             throw GitLabAPIError.invalidURL("<專案識別字無效>")
         }
