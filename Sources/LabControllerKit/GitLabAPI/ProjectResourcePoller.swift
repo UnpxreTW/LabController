@@ -97,10 +97,13 @@ public struct ProjectResourcePoller: Sendable {
 
     /// 可接受的網址 scheme。
     ///
-    /// 這道白名單擋的是**寫得出主機名、scheme 卻不是 HTTP** 的輸入，例如 `ftp://gitlab.example.com`：
-    /// 它通得過主機名那道守衛，若不另外限制 scheme，就會帶著憑證標頭一路交給傳輸層。
-    /// （少寫 scheme 的 `gitlab.example.com:7071` 由主機名守衛擋下——它解析後 host 為 nil，
-    /// 不是被這裡擋的。）
+    /// 擋兩種輸入，而且都是這道白名單先攔下（守衛鏈上它排在主機名之前）：
+    ///
+    /// - `ftp://gitlab.example.com`——主機名寫得出來，少了白名單就會帶著憑證標頭交給傳輸層。
+    /// - `gitlab.example.com:7071`（少寫 scheme）——`URLComponents` 把冒號前那段當成 scheme、
+    ///   host 解成 nil；`gitlab.example.com` 不在白名單內，於是在這裡就被擋掉。
+    ///
+    /// 主機名那道守衛因此不是備援而是另一種形狀：scheme 合法、主機名卻是空的（例如 `https:///x`）。
     static let acceptedSchemes: Set<String> = ["http", "https"]
 
     /// 實際採用的每頁筆數，已夾在 `1 ... maximumPageSize`。
@@ -230,15 +233,23 @@ public struct ProjectResourcePoller: Sendable {
         // 游標沒動時，下一輪會不會讀到一模一樣的東西？三種各自獨立、都不會自己好的形狀：
         let firstPageWouldAdvance: Bool = firstPageMaximum.map(cursor.wouldAdvance) ?? false
         // ①同秒群塞滿第一頁：第一頁有資料、卻整頁落在游標那一秒內，而後面還有頁。
+        // （預設翻頁預算為 1 時「後面還有頁」必然同時讓 `isTruncated` 成立，`completion` 那邊已涵蓋；
+        //  這兩條在預算大於 1 時才單獨發揮作用。）
         let wedgedOnTie: Bool = firstPageMaximum != nil && !firstPageWouldAdvance && pagesRead > 1
         // ②第一頁是空的卻還有下一頁：站台異常，第一頁沒有任何可採信的證據。
         let firstPageEmptyWithMore: Bool = firstPageMaximum == nil && pagesRead > 1
-        // ③第一頁本來推得動，卻被上限壓回原位——**只有上限來自本機時鐘那條退路時才算卡住**。
-        // 上限若來自站台 `Date` 標頭，壓住只會是暫時的：那個標頭只有整秒精度、又扣了來回耗時，
-        // 因此系統性地落後真實時刻約一秒；最近一秒內的異動本輪推不動、下一輪就推得動了。
+        // ③第一頁本來推得動，卻被上限壓回原位——**只有上限本身不堪用時才算卡住**。
+        // 上限若來自站台 `Date` 標頭且與本機時鐘大致對得上，壓住只會是暫時的：那個標頭只有整秒精度、
+        // 又扣了來回耗時，因此系統性地落後真實時刻約一秒；最近一秒內的異動本輪推不動、下一輪就推得動。
         // 把那種情況也報成 stalled，會讓完全正常的站台每有一筆剛發生的異動就誤報一次，
         // 而 stalled 一旦開始誤報就沒有人會再認真看它。
-        let cappedByUnusableClock: Bool = firstPageWouldAdvance && usedFallbackStart
+        //
+        // 但「來自站台」不等於「堪用」：前端快取或時鐘停住的節點會發出固定或過期的 `Date`，
+        // 上限就此凍住、游標永遠不動，而每輪都回報一切正常。因此再比一次本機時鐘：
+        // 兩者相差超過容差即視為不堪用（容差本來就是「我們容忍多少時鐘分歧」這個量）。
+        let capIsUnusable: Bool = usedFallbackStart
+            || localClock().timeIntervalSince(startedAt) > clockSkewAllowance + Self.requestTimeout
+        let cappedByUnusableClock: Bool = firstPageWouldAdvance && capIsUnusable
         let completion: PollCompletion = Self.completion(
             isTruncated: isTruncated,
             didAdvance: advanced != cursor,

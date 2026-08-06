@@ -13,23 +13,26 @@ import Testing
 
 private final class ProjectResourcePollerClockTests {
 
-    /// 反例配對：上限來自站台 `Date` 標頭而壓住游標時，**不算卡住**。
-    ///
-    /// 該標頭只有整秒精度、又扣掉了來回耗時，因此系統性地落後真實時刻約一秒；最近一秒內的異動
-    /// 本輪推不動、下一輪就推得動。報成 `stalled` 會讓完全正常的站台每有一筆剛發生的異動就誤報一次，
-    /// 而這個狀態一旦開始誤報就沒有人會再認真看它。與上一例只差「上限從哪裡來」。
+    /// 站台 `Date` 標頭停住不走（前端快取、時鐘卡死的節點）時，上限就此凍住、游標永遠不動，
+    /// 而每輪都會回報一切正常。「來自站台」不等於「堪用」——與本機時鐘差距超過容差即視為不堪用。
     @Test
-    func `a cap from the server clock is not reported as a stall`() async throws {
+    func `a server clock far behind the local clock is treated as unusable`() async throws {
         let transport: PollScriptedTransport = .init([
             pollPageResponse(
-                #"[{"id":1,"updated_at":"2026-08-06T09:00:11.200Z"}]"#,
+                #"[{"id":1,"updated_at":"2026-08-06T09:00:20Z"}]"#,
                 page: 1,
                 nextPage: nil,
-                serverDate: "Thu, 06 Aug 2026 09:00:11 GMT"
+                serverDate: "Thu, 06 Aug 2026 09:00:05 GMT"
             ),
         ])
         let frozen: ContinuousClock.Instant = .now
-        let poller: ProjectResourcePoller = .init(transport: transport, monotonicNow: { frozen })
+        let poller: ProjectResourcePoller = .init(
+            transport: transport,
+            clockSkewAllowance: 60,
+            // 本機時鐘比站台回報的時刻晚一小時，遠超過容差＋逾時。
+            localClock: { .init(timeIntervalSince1970: pollReference + 3600) },
+            monotonicNow: { frozen }
+        )
         let cursor: UpdatedAfterCursor = .init(watermark: .init(timeIntervalSince1970: pollReference + 10))
         let result: ResourcePollResult<PollSyntheticResource> = try await poller.poll(
             host: "https://gitlab.example.com",
@@ -38,12 +41,15 @@ private final class ProjectResourcePollerClockTests {
             privateToken: "synthetic-read-token",
             cursor: cursor
         )
-        // 上限 09:00:11 取整後仍是 09:00:11 > 水位 09:00:10，故其實推得動；
-        // 真正要釘的是「就算推不動也不會被誤報成 stalled」，見下一行的反例。
-        #expect(result.completion != .stalled)
+        #expect(result.cursor == cursor)
+        #expect(result.completion == .stalled)
     }
 
-    /// 同上，但把站台時刻壓在水位那一秒內，讓游標確實推不動——仍然不得報成 `stalled`。
+    /// 反例配對：上限來自站台 `Date` 標頭而壓住游標時，**不算卡住**。
+    ///
+    /// 該標頭只有整秒精度、又扣掉了來回耗時，因此系統性地落後真實時刻約一秒；最近一秒內的異動
+    /// 本輪推不動、下一輪就推得動。報成 `stalled` 會讓完全正常的站台每有一筆剛發生的異動就誤報一次，
+    /// 而這個狀態一旦開始誤報就沒有人會再認真看它。與「時鐘不堪用」那一例只差上限從哪裡來。
     @Test
     func `a blocked cursor under a server clock cap stays complete`() async throws {
         let transport: PollScriptedTransport = .init([
