@@ -48,11 +48,11 @@ public struct RunnerRegistrationClient: Sendable {
         guard response.statusCode == 201 else {
             throw GitLabAPIError.unexpectedStatus(response.statusCode)
         }
-        guard let runner: RegisteredRunner = try? JSONDecoder().decode(RegisteredRunner.self, from: response.body)
-        else {
-            throw GitLabAPIError.undecodableBody
+        do {
+            return try JSONDecoder().decode(RegisteredRunner.self, from: response.body)
+        } catch {
+            throw GitLabAPIError.undecodableBody(codingPath: JobRequestClient.codingPath(of: error))
         }
-        return runner
     }
 
     /// `POST /api/v4/runners/verify`：驗證認證 token 於站台端仍有效。

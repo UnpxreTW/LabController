@@ -19,5 +19,11 @@ public enum GitLabAPIError: Error, Equatable, Sendable {
     case unexpectedStatus(Int)
 
     /// 回應本體解不出預期的 JSON 形狀。
-    case undecodableBody
+    ///
+    /// `codingPath` 是解不開的位置（如 `id`），**刻意只帶鍵名、不帶值**：這條錯誤會被寫進
+    /// log，而 body 裡有 job token 與變數值。空字串代表拿不到位置資訊。
+    ///
+    /// 帶著位置是因為「body 解不開」單獨一句話查不動——`JobResponse` 現在只有 `id`／`token`
+    /// 缺席會走到這裡，而這兩者缺哪一個、下一步完全不同。
+    case undecodableBody(codingPath: String = "")
 }
