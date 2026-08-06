@@ -354,8 +354,9 @@ private final class ProjectResourcePollerCursorTests {
             privateToken: "synthetic-read-token",
             cursor: cursor
         )
-        // 剛好跨出那一秒、不多跨：推到 09:00:20 而非本輪最大的 09:00:25。
-        #expect(result.cursor.watermark == Date(timeIntervalSince1970: reference + 20))
+        // 只跨一秒：推到 09:00:01，**不是**第二頁起點的 09:00:20。跨到觀察值會把
+        // 09:00:01–09:00:20 之間的一切一次沉到水位之下，而那段正是位移最可能吃掉東西的地方。
+        #expect(result.cursor.watermark == Date(timeIntervalSince1970: reference + 1))
         #expect(result.crossedOversizedTie)
         #expect(result.completion == .complete)
     }
@@ -379,6 +380,31 @@ private final class ProjectResourcePollerCursorTests {
         #expect(result.completion == .stalled)
         #expect(result.cursor == cursor)
         #expect(!result.crossedOversizedTie)
+    }
+
+    /// 第一頁是空的卻還有下一頁：那是異常，**不是**同秒群。此時沒有任何第一頁證據，游標不得憑第二頁前進。
+    @Test
+    func `an empty first page never counts as a tie group`() async throws {
+        let transport: ScriptedTransport = .init([
+            pageResponse("[]", page: 1, nextPage: 2),
+            pageResponse(#"[{"id":1,"updated_at":"2026-08-06T09:00:40Z"}]"#, page: 2, nextPage: nil),
+        ])
+        let poller: ProjectResourcePoller = .init(
+            transport: transport,
+            localClock: { .init(timeIntervalSince1970: reference + 3600) }
+        )
+        let cursor: UpdatedAfterCursor = .init(watermark: .init(timeIntervalSince1970: reference))
+        let result: ResourcePollResult<SyntheticResource> = try await poller.poll(
+            host: "https://gitlab.example.com",
+            projectIdentifier: "42",
+            collection: .mergeRequests,
+            privateToken: "synthetic-read-token",
+            cursor: cursor
+        )
+        #expect(result.cursor == cursor)
+        #expect(!result.crossedOversizedTie)
+        // 有東西越過了游標、卻不在可採信的位置上：不推進，但要出聲。
+        #expect(result.completion == .stalled)
     }
 
     /// 反例配對：第一頁的最大值本來就推得動游標時，不算跨同秒群，旗標維持關閉。
@@ -622,6 +648,44 @@ private final class ProjectResourcePollerFailureTests {
             )
         }
         #expect(transport.requests.withLock { $0.isEmpty })
+    }
+
+    /// host 帶查詢字串或片段時必須擋下。
+    ///
+    /// 這類 host 若用字串串接組路徑，整段 `/api/v4/…` 會被吞進查詢或片段裡，
+    /// 組出一個打在站台首頁、卻完全不像壞掉的網址——請求會成功、回的是網頁。
+    @Test
+    func `host carrying a query or fragment is rejected`() async {
+        for host: String in ["https://gitlab.example.com?a=b", "https://gitlab.example.com#frag"] {
+            let transport: ScriptedTransport = .init([])
+            let poller: ProjectResourcePoller = .init(transport: transport)
+            await #expect(throws: GitLabAPIError.self) {
+                let _: ResourcePollResult<SyntheticResource> = try await poller.poll(
+                    host: host,
+                    projectIdentifier: "42",
+                    collection: .issues,
+                    privateToken: "synthetic-read-token",
+                    cursor: .init()
+                )
+            }
+            #expect(transport.requests.withLock { $0.isEmpty })
+        }
+    }
+
+    /// host 帶路徑前綴（反向代理掛在子路徑下）時保留該前綴，且結尾多重斜線一併修掉。
+    @Test
+    func `host path prefix is preserved and trailing slashes collapse`() async throws {
+        let transport: ScriptedTransport = .init([pageResponse("[]", page: 1, nextPage: nil)])
+        let poller: ProjectResourcePoller = .init(transport: transport)
+        let _: ResourcePollResult<SyntheticResource> = try await poller.poll(
+            host: "https://example.com/gitlab//",
+            projectIdentifier: "42",
+            collection: .issues,
+            privateToken: "synthetic-read-token",
+            cursor: .init()
+        )
+        let request: HTTPRequest = try #require(transport.requests.withLock { $0.first })
+        #expect(request.url.path == "/gitlab/api/v4/projects/42/issues")
     }
 
     /// 組不出帶 scheme 的網址時拋網址錯誤、不發出任何請求。

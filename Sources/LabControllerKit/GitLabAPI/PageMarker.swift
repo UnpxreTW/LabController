@@ -43,7 +43,9 @@ public struct PageMarker: Sendable, Equatable {
     ///     ——錯誤看得見也修得掉，無聲的吞吐崩塌不會。
     ///   - `X-Page` 與 `requestedPage` 不符——快取或代理回了別頁。照收會把那頁的內容誤記成本頁，
     ///     且下一頁的頁碼是從錯的位置往下推。
-    ///   - 下一頁頁碼不大於本頁——迴圈會原地打轉；這是唯一不需要外部計時器就能擋下的無限迴圈形狀。
+    ///   - 下一頁頁碼不是本頁加一。站台只會發「本頁＋1」，因此**往回指、指向自己、或往前跳號**都是異常。
+    ///     往回或指向自己會讓迴圈原地打轉；**往前跳號更危險**——中間那一頁不會被請求，內容整頁不見，
+    ///     而呼叫端收到的是一切正常。要求恰為加一，成本是零，換到的是把無聲跳頁變成看得見的錯誤。
     public init(response: HTTPResponse, requestedPage: Int) throws {
         guard let rawPage: String = response.headerValue("X-Page"), let page: Int = .init(rawPage) else {
             throw GitLabAPIError.malformedPagination("X-Page 缺席或非整數")
@@ -59,8 +61,8 @@ public struct PageMarker: Sendable, Equatable {
             guard let value: Int = .init(rawNext) else {
                 throw GitLabAPIError.malformedPagination("X-Next-Page 非整數：\(rawNext)")
             }
-            guard value > page else {
-                throw GitLabAPIError.malformedPagination("下一頁 \(value) 未大於本頁 \(page)")
+            guard value == page + 1 else {
+                throw GitLabAPIError.malformedPagination("下一頁應為 \(page + 1)、站台回報 \(value)")
             }
             return value
         }()

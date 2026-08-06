@@ -66,6 +66,15 @@ private final class PageMarkerTests {
         }
     }
 
+    /// 下一頁往前跳號也擋下：那一頁不會被請求，內容整頁不見，而呼叫端收到的是一切正常。
+    @Test
+    func `next page skipping ahead is rejected`() {
+        let response: HTTPResponse = .init(statusCode: 200, headers: ["X-Page": "1", "X-Next-Page": "3"])
+        #expect(throws: GitLabAPIError.self) {
+            try PageMarker(response: response, requestedPage: 1)
+        }
+    }
+
     /// 缺 `X-Page` 不可靜默當單頁：那會讓輪詢永遠只讀第一頁而毫無徵兆。
     @Test
     func `missing current page header is rejected`() {

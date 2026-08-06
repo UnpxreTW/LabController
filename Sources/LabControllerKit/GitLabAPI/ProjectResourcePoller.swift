@@ -45,10 +45,16 @@ import Foundation
 /// 重新交出去一次，而且比它們新的資源永遠排在後面，多到超過翻頁預算時就再也讀不到，
 /// **從重複變成真正的遺漏**。
 ///
-/// 因此當第一頁整頁落在游標那一秒內時，改推到「本輪讀到的、秒數已越過游標的最早一筆」，
-/// 也就是剛好跨出那一秒、不多跨。代價明說：**該秒的位移保護就此失效**——那一秒內若有資源在翻頁
-/// 期間被移動或刪除，可能就此漏掉。結果會以 `ResourcePollResult.crossedOversizedTie` 標出來。
-/// 若連跨都跨不出去（整輪預算都還在同一秒內），游標維持不動並回報 `PollCompletion.stalled`。
+/// 因此當第一頁整頁落在游標那一秒內、而且本輪確實讀到了秒數已越過游標的資源（＝這個同秒群在讀到的
+/// 頁數之內結束了）時，游標**往前跨整整一秒**，不多跨。
+///
+/// 跨的距離刻意寫死一秒、而不是跨到那筆觀察到的資源：那筆來自第二頁以後，正是不可採信的位置。
+/// 位移一旦發生，第二頁的起點可能落在很後面（實測可達數十秒乃至跨日），跨過去等於把中間那整段
+/// 一次沉到水位之下。跨一秒則把曝險**關在那一秒之內**：只有該秒內、且在翻頁期間被移動或刪除的資源
+/// 可能漏掉，該秒之後的一切下一輪都還讀得到。
+///
+/// 結果會以 `ResourcePollResult.crossedOversizedTie` 標出來。若同秒群連結束都還沒讀到
+/// （整輪預算都還在同一秒內），游標維持不動並回報 `PollCompletion.stalled`——絕不跳過沒讀到的成員。
 ///
 /// ## 上限：不晚於本輪起始的站台時鐘
 ///
@@ -194,17 +200,27 @@ public struct ProjectResourcePoller: Sendable {
         }
         let startedAt: Date = walkStartedAt ?? fallbackStartTime()
         var advanced: UpdatedAfterCursor = cursor.advanced(to: firstPageMaximum, noLaterThan: startedAt)
-        // 第一頁整頁落在游標那一秒內、後面還有頁：只採信第一頁的話游標永遠推不動（見型別說明的例外）。
-        let isWedgedOnTie: Bool = pagesRead > 1 && !(firstPageMaximum.map(cursor.wouldAdvance) ?? false)
+        // 卡在同秒群的三個條件缺一不可：第一頁**有資料**、整頁落在游標那一秒內、且後面還有頁。
+        // 「第一頁有資料」不可省——空的第一頁配上下一頁指標是異常，此時沒有任何第一頁證據可依據。
+        let isWedgedOnTie: Bool = pagesRead > 1 && firstPageMaximum.map { !cursor.wouldAdvance(to: $0) } ?? false
         var crossedOversizedTie: Bool = false
-        if isWedgedOnTie, let escape: Date = earliestBeyondCursor {
-            let escaped: UpdatedAfterCursor = cursor.advanced(to: escape, noLaterThan: startedAt)
+        // 跨過去的前提是「這個同秒群確實在讀到的頁數之內結束了」——看到秒數已越過游標的資源才算數；
+        // 沒看到就代表群還沒讀完，往前一步就會跳過沒讀到的成員。
+        if isWedgedOnTie, earliestBeyondCursor != nil, let watermark: Date = cursor.watermark {
+            // 只跨一秒，**不跨到觀察值**。觀察值來自第二頁以後、不可採信，跨過去等於把
+            // 「只採信第一頁」的保護整段丟掉：位移一發生，第二頁的起點就可能落在很後面，
+            // 中間那段會一次全部沉到水位之下。跨一秒則把曝險關在那一秒之內。
+            let escaped: UpdatedAfterCursor = cursor.advanced(
+                to: watermark.addingTimeInterval(1),
+                noLaterThan: startedAt
+            )
             crossedOversizedTie = escaped != cursor
             advanced = escaped
         }
-        // 沒有上限時本來會不會動？用來分辨「本來就沒東西可推進」與「有東西、卻被上限壓住不動」。
+        // 沒有上限時本來會不會動？用來分辨「本來就沒東西可推進」與「有東西、卻推不動」。
+        // 後者含兩種：被時鐘上限壓住，以及看到了越過游標的資源卻不在可採信的位置上。
         let hadRoomToAdvance: Bool = (firstPageMaximum.map(cursor.wouldAdvance) ?? false)
-            || (isWedgedOnTie && earliestBeyondCursor.map(cursor.wouldAdvance) ?? false)
+            || (earliestBeyondCursor.map(cursor.wouldAdvance) ?? false)
         let completion: PollCompletion = Self.completion(
             isTruncated: isTruncated,
             didAdvance: advanced != cursor,
@@ -231,8 +247,11 @@ public struct ProjectResourcePoller: Sendable {
         decoder.dateDecodingStrategy = .custom { decoder in
             let raw: String = try decoder.singleValueContainer().decode(String.self)
             guard let date: Date = Self.parseTimestamp(raw) else {
+                // 原值截斷後才放進訊息：這個欄位的內容由站台端資料決定、長度不設限，
+                // 原樣帶進錯誤訊息等於讓外部內容決定訊息大小。
+                let shown: String = raw.count > 40 ? "\(raw.prefix(40))…" : raw
                 throw DecodingError.dataCorrupted(
-                    .init(codingPath: decoder.codingPath, debugDescription: "不是可解析的 ISO-8601 時間戳：\(raw)")
+                    .init(codingPath: decoder.codingPath, debugDescription: "不是可解析的 ISO-8601 時間戳：\(shown)")
                 )
             }
             return date
@@ -310,19 +329,25 @@ public struct ProjectResourcePoller: Sendable {
         cursor: UpdatedAfterCursor,
         page: Int
     ) async throws -> HTTPResponse {
-        // 修掉結尾**所有**斜線：只修一個的話 `…example.com//` 會組出 `//api/v4/…`，路徑多一層空片段。
-        let base: String = .init(host.reversed().drop { $0 == "/" }.reversed())
         var unreserved: CharacterSet = .alphanumerics
         unreserved.insert(charactersIn: "-._~")
         guard let identifier: String = projectIdentifier.addingPercentEncoding(withAllowedCharacters: unreserved) else {
             throw GitLabAPIError.invalidURL(projectIdentifier)
         }
-        let path: String = "\(base)/api/v4/projects/\(identifier)/\(collection.pathComponent)"
-        guard var components: URLComponents = .init(string: path),
+        // host 先自己解析成元件再接路徑，不先做字串串接：串接會讓帶查詢字串或片段的 host
+        // 把整段 `/api/v4/…` 吞進查詢或片段裡，組出一個打在站台首頁、卻完全不像壞掉的網址。
+        guard var components: URLComponents = .init(string: host),
               let scheme: String = components.scheme,
-              Self.acceptedSchemes.contains(scheme.lowercased()) else {
+              Self.acceptedSchemes.contains(scheme.lowercased()),
+              components.host?.isEmpty == false,
+              components.query == nil,
+              components.fragment == nil else {
             throw GitLabAPIError.invalidURL(host)
         }
+        // 修掉結尾**所有**斜線：只修一個的話 `…example.com//` 會組出 `//api/v4/…`，路徑多一層空片段。
+        let base: String = .init(components.percentEncodedPath.reversed().drop { $0 == "/" }.reversed())
+        // 用 percentEncodedPath 而非 path：後者的 setter 視傳入值為未編碼，會把 `%2F` 再編成 `%252F`。
+        components.percentEncodedPath = "\(base)/api/v4/projects/\(identifier)/\(collection.pathComponent)"
         var items: [URLQueryItem] = [
             // order_by／sort 不開放呼叫端覆寫：游標的正確性建立在這個排序上（見型別說明）。
             .init(name: "order_by", value: "updated_at"),
@@ -335,7 +360,7 @@ public struct ProjectResourcePoller: Sendable {
         }
         components.queryItems = items
         guard let url: URL = components.url else {
-            throw GitLabAPIError.invalidURL(path)
+            throw GitLabAPIError.invalidURL(host)
         }
         let request: HTTPRequest = .init(
             method: "GET",
