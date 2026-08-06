@@ -51,6 +51,10 @@ public struct URLSessionTransport: HTTPTransport {
         let configuration: URLSessionConfiguration = .default
         configuration.timeoutIntervalForResource = 600
         configuration.waitsForConnectivity = false
+        // 不吃快取：輪詢的每一次請求都在問「現在怎麼樣」，被重播的一頁舊資料會讓游標永遠不動，
+        // 而分頁標頭一模一樣、任何一層都看不出來。連 `Date` 標頭都會跟著重播，上限也跟著凍住。
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
         return .init(configuration: configuration)
     }()
 

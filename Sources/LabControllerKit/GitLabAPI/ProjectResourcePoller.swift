@@ -243,41 +243,32 @@ public struct ProjectResourcePoller: Sendable {
         // 迴圈至少跑一輪、且在該輪就設定起始時刻，否則早已拋錯離開；`??` 只是讓型別收斂。
         let startedAt: Date = walkStartedAt ?? localClock().addingTimeInterval(-clockSkewAllowance)
         let advanced: UpdatedAfterCursor = cursor.advanced(to: firstPageMaximum, noLaterThan: startedAt)
-        // 游標沒動時，下一輪會不會讀到一模一樣的東西？三種各自獨立、都不會自己好的形狀：
-        let firstPageWouldAdvance: Bool = firstPageMaximum.map(cursor.wouldAdvance) ?? false
-        // ①同秒群塞滿第一頁：第一頁有資料、卻整頁落在游標那一秒內，而後面還有頁。
-        // （預設翻頁預算為 1 時「後面還有頁」必然同時讓 `isTruncated` 成立，`completion` 那邊已涵蓋；
-        //  這兩條在預算大於 1 時才單獨發揮作用。）
-        let wedgedOnTie: Bool = firstPageMaximum != nil && !firstPageWouldAdvance && pagesRead > 1
-        // ②第一頁是空的卻還有下一頁：站台異常，第一頁沒有任何可採信的證據。
-        let firstPageEmptyWithMore: Bool = firstPageMaximum == nil && pagesRead > 1
-        // ③第一頁本來推得動，卻被上限壓回原位——**只有上限本身不堪用時才算卡住**。
-        // 上限若來自站台 `Date` 標頭且與本機時鐘大致對得上，壓住只會是暫時的：那個標頭只有整秒精度、
-        // 又扣了來回耗時，因此系統性地落後真實時刻約一秒；最近一秒內的異動本輪推不動、下一輪就推得動。
-        // 把那種情況也報成 stalled，會讓完全正常的站台每有一筆剛發生的異動就誤報一次，
-        // 而 stalled 一旦開始誤報就沒有人會再認真看它。
-        //
-        // 兩個時鐘對不對得上——**只知道它們不一致，不知道是哪一邊錯**。
-        //
-        // 對比的兩端都取自同一個瞬間附近：第一個請求送出前的本機讀值對上由第一個回應導出的上限。
-        // 拿走完所有頁之後的時刻去比，會把整趟翻頁的耗時全記成分歧，「補舊資料所以調高翻頁預算」
-        // 本身就會誤報。取絕對值是因為兩個方向都要知道：上限落到未來等於上限不存在，
-        // 落到過去則可能把游標壓住。容差之外再放一個請求逾時：兩端本來就隔著一次來回，
-        // 加上 `Date` 標頭只有整秒精度。
+        // 兩個時鐘對不對得上——**只知道它們不一致，不知道是哪一邊錯**，因此只影響
+        // `capIsTrustworthy`、不參與 stalled 判定（本機時鐘偏掉時站台完全正常）。
+        // 對比的兩端取自同一個瞬間附近：第一個請求送出前的本機讀值對上由第一個回應導出的上限；
+        // 拿走完所有頁之後的時刻去比，會把整趟翻頁的耗時全記成分歧。取絕對值是因為兩個方向都要知道：
+        // 上限落到未來等於上限不存在，落到過去則可能把游標壓住。容差之外再放一個請求逾時：
+        // 兩端本來就隔著一次來回，加上 `Date` 標頭只有整秒精度。
         let clocksDisagree: Bool = abs(
             (walkSentAtWallClock ?? localClock()).timeIntervalSince(startedAt)
         ) > clockSkewAllowance + Self.requestTimeout
-        // ⚠ 時鐘不一致**不拿來判 stalled**。這個比較分不出是站台錯還是本機錯，而本機時鐘偏掉時
-        // 站台完全正常、下一輪照樣推得動——報成「不會自己好」的 stalled 就是誤報，
-        // 而這個狀態一旦開始誤報就沒有人會再認真看它。它只影響 `capIsTrustworthy`。
+        // 游標沒動時，下一輪會不會讀到一模一樣的東西？
         //
-        // 真正會一直卡住的是另一件事：**根本沒有站台時鐘可用**。此時上限完全建立在本機時鐘上，
-        // 本機時鐘落後站台就會一路壓住游標，而且沒有任何東西會把它拉回來。
-        let cappedByUnusableClock: Bool = firstPageWouldAdvance && usedFallbackStart
+        // 只收**單憑本輪證據就證明得了**的形狀。凡是與時鐘有關的（上限落後、沒有 `Date` 標頭、
+        // 兩個時鐘對不上）一律不算：那些都可能下一秒就自己好，而本輪看不出來。時鐘的狀況改由
+        // `ResourcePollResult.capIsTrustworthy` 表達，「跨輪都沒動」則由保存游標的呼叫端自己看得出來。
+        let firstPageWouldAdvance: Bool = firstPageMaximum.map(cursor.wouldAdvance) ?? false
+        // 集合超出第一頁：讀了不只一頁，或撞到預算時後面還有頁。
+        let exceedsFirstPage: Bool = isTruncated || pagesRead > 1
+        // ①同秒群塞滿第一頁：第一頁有資料、卻整頁落在游標那一秒內，而集合還有後續。
+        //   游標只採信第一頁，於是無處可去——這是規則本身決定的，換幾次都一樣。
+        let wedgedOnTie: Bool = firstPageMaximum != nil && !firstPageWouldAdvance && exceedsFirstPage
+        // ②第一頁是空的、集合卻還有後續：站台異常，第一頁沒有任何可採信的證據。
+        let firstPageEmptyWithMore: Bool = firstPageMaximum == nil && exceedsFirstPage
         let completion: PollCompletion = Self.completion(
             isTruncated: isTruncated,
             didAdvance: advanced != cursor,
-            willRepeat: wedgedOnTie || firstPageEmptyWithMore || cappedByUnusableClock
+            willRepeat: wedgedOnTie || firstPageEmptyWithMore
         )
         return .init(
             elements: elements,
@@ -370,8 +361,11 @@ public struct ProjectResourcePoller: Sendable {
     /// 是正常的安靜輪次；**會原封不動再來一次**則代表下一輪讀到一模一樣的內容、再次沒動，
     /// 如此反覆而每一輪各自看起來都成功了。後者必須具名為 `stalled`，撞到預算而原地踏步同理。
     static func completion(isTruncated: Bool, didAdvance: Bool, willRepeat: Bool) -> PollCompletion {
-        guard didAdvance else {
-            return (isTruncated || willRepeat) ? .stalled : .complete
+        // `willRepeat` 是唯一能判 `stalled` 的依據，**撞到預算不算**。
+        // 撞到預算而游標沒動，多半只是上限比資料晚了不到一秒（`Date` 標頭整秒精度所致）——
+        // 那是暫時的，而且「後面還有頁」本來就該用 `truncated` 表達。
+        if willRepeat {
+            return .stalled
         }
         return isTruncated ? .truncated : .complete
     }

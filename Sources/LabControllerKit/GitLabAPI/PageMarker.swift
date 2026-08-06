@@ -50,6 +50,10 @@ public struct PageMarker: Sendable, Equatable {
         guard let rawPage: String = response.headerValue("X-Page"), let page: Int = .init(rawPage) else {
             throw GitLabAPIError.malformedPagination("X-Page 缺席或非整數")
         }
+        // `page + 1` 在 `Int.max` 會 trap；頁碼是站台與呼叫端各給一半的值，不該由此當掉。
+        guard page > 0, page < Int.max else {
+            throw GitLabAPIError.malformedPagination("X-Page 不是合理的頁碼：\(page)")
+        }
         guard page == requestedPage else {
             throw GitLabAPIError.malformedPagination("要求第 \(requestedPage) 頁、站台回報第 \(page) 頁")
         }

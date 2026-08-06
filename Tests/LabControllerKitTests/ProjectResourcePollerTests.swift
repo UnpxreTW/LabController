@@ -233,10 +233,12 @@ private final class ProjectResourcePollerCursorTests {
 
     /// 有東西可推進、卻被上限壓住而動不了，同樣是會自我重複的狀態，即使沒撞到翻頁預算也要報 `stalled`。
     ///
-    /// 場景：站台沒送 `Date` 標頭、本機時鐘又落後站台一小時 → 起始時刻早於所有資源 → 游標永遠不動，
-    /// 而每一輪都會回報 `complete`，看起來像「什麼都沒發生」。
+    /// 場景：站台沒送 `Date` 標頭、本機時鐘又落後站台一小時 → 起始時刻早於所有資源 → 游標推不動。
+    ///
+    /// 這件事**不報成 `stalled`**：本輪看不出它會不會自己好（時鐘走著走著上限就追上來了），
+    /// 而 `stalled` 的語義是「不會自己好」。改由 `capIsTrustworthy` 表達「這一輪的上限別當保護」。
     @Test
-    func `cursor blocked by a bogus clock reports a stall even when not truncated`() async throws {
+    func `an unusable clock lowers trust without claiming the round will repeat`() async throws {
         let transport: PollScriptedTransport = .init([
             pollPageResponse(#"[{"id":1,"updated_at":"2026-08-06T09:00:20Z"}]"#, page: 1, nextPage: nil, serverDate: nil),
         ])
@@ -252,8 +254,9 @@ private final class ProjectResourcePollerCursorTests {
             privateToken: "synthetic-read-token",
             cursor: cursor
         )
-        #expect(result.completion == .stalled)
         #expect(result.cursor == cursor)
+        #expect(!result.capIsTrustworthy)
+        #expect(result.completion != .stalled)
     }
 
     /// 同一秒的資源塞滿第一頁時，游標推不動——**不自作主張跨過去**，改回報 `stalled`。
