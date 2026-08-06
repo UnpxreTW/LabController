@@ -13,7 +13,10 @@
 /// 內部，那批事件就在「已讀過」與「未落地」之間永久消失。
 public struct ResourcePollResult<Element: Sendable>: Sendable {
 
-    /// 本輪讀到的資源，依 `updated_at` 由舊到新。
+    /// 本輪讀到的資源，**通常**依 `updated_at` 由舊到新。
+    ///
+    /// 不是保證：站台是照 `updated_at` 升冪回的，但多頁走查橫跨數次請求，翻頁期間若有帶著較舊時間戳的
+    /// 資源被插進來（匯入、專案搬移），跨頁交界處就可能不是遞增。需要嚴格順序的下游請自行排序。
     ///
     /// **可能含上一輪已見過的內容**——游標刻意保守（見 `UpdatedAfterCursor`），去重是下游的職責。
     public let elements: [Element]

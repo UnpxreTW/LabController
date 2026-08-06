@@ -175,7 +175,7 @@ private final class ProjectResourcePollerTests {
             pageResponse(#"[{"id":2,"updated_at":"2026-08-06T09:00:10Z"}]"#, page: 2, nextPage: 3),
             pageResponse(#"[{"id":3,"updated_at":"2026-08-06T09:00:20.750Z"}]"#, page: 3, nextPage: nil),
         ])
-        let poller: ProjectResourcePoller = .init(transport: transport)
+        let poller: ProjectResourcePoller = .init(transport: transport, pageBudget: 3)
         let result: ResourcePollResult<SyntheticResource> = try await poller.poll(
             host: "https://gitlab.example.com",
             projectIdentifier: "42",
@@ -231,7 +231,7 @@ private final class ProjectResourcePollerCursorTests {
             pageResponse(#"[{"id":1,"updated_at":"2026-08-06T09:00:05Z"}]"#, page: 1, nextPage: 2),
             pageResponse(#"[{"id":2,"updated_at":"2026-08-06T09:00:20Z"}]"#, page: 2, nextPage: nil),
         ])
-        let poller: ProjectResourcePoller = .init(transport: transport)
+        let poller: ProjectResourcePoller = .init(transport: transport, pageBudget: 2)
         let result: ResourcePollResult<SyntheticResource> = try await poller.poll(
             host: "https://gitlab.example.com",
             projectIdentifier: "42",
@@ -290,10 +290,12 @@ private final class ProjectResourcePollerCursorTests {
                 serverDate: "Thu, 06 Aug 2026 09:01:00 GMT"
             ),
         ])
-        // 固定本機時鐘讓來回耗時恰為 0，把「起始時刻取自哪個回應」單獨隔離出來檢驗。
+        // 凍住單調時鐘讓來回耗時恰為 0，把「起始時刻取自哪個回應」單獨隔離出來檢驗。
+        let frozen: ContinuousClock.Instant = .now
         let poller: ProjectResourcePoller = .init(
             transport: transport,
-            localClock: { .init(timeIntervalSince1970: reference) }
+            pageBudget: 2,
+            monotonicNow: { frozen }
         )
         let result: ResourcePollResult<SyntheticResource> = try await poller.poll(
             host: "https://gitlab.example.com",
@@ -337,6 +339,7 @@ private final class ProjectResourcePollerCursorTests {
     /// 沒露過面的同時刻資源就此沉到水位之下、永遠讀不到。卡住則一筆都沒丟。
     @Test
     func `an oversized tie group on the first page stalls instead of being crossed`() async throws {
+        // 預設預算為 1，這裡要讀到第二頁才驗得到「讀完了也照樣不推進」。
         let transport: ScriptedTransport = .init([
             pageResponse(
                 #"[{"id":1,"updated_at":"2026-08-06T09:00:00.100Z"},{"id":2,"updated_at":"2026-08-06T09:00:00.900Z"}]"#,
@@ -350,7 +353,7 @@ private final class ProjectResourcePollerCursorTests {
                 serverDate: "Thu, 06 Aug 2026 09:01:00 GMT"
             ),
         ])
-        let poller: ProjectResourcePoller = .init(transport: transport)
+        let poller: ProjectResourcePoller = .init(transport: transport, pageBudget: 2)
         let cursor: UpdatedAfterCursor = .init(watermark: .init(timeIntervalSince1970: reference))
         let result: ResourcePollResult<SyntheticResource> = try await poller.poll(
             host: "https://gitlab.example.com",
@@ -390,10 +393,13 @@ private final class ProjectResourcePollerCursorTests {
     func `an empty first page never counts as a tie group`() async throws {
         let transport: ScriptedTransport = .init([
             pageResponse("[]", page: 1, nextPage: 2),
-            pageResponse(#"[{"id":1,"updated_at":"2026-08-06T09:00:40Z"}]"#, page: 2, nextPage: nil),
+            // 第二頁那筆刻意留在游標那一秒內：否則「看到越過游標的資源」這條就會先成立，
+            // 空第一頁的偵測根本不會被執行到，刪掉它測試也不會轉紅。
+            pageResponse(#"[{"id":1,"updated_at":"2026-08-06T09:00:00.500Z"}]"#, page: 2, nextPage: nil),
         ])
         let poller: ProjectResourcePoller = .init(
             transport: transport,
+            pageBudget: 2,
             localClock: { .init(timeIntervalSince1970: reference + 3600) }
         )
         let cursor: UpdatedAfterCursor = .init(watermark: .init(timeIntervalSince1970: reference))
@@ -416,7 +422,7 @@ private final class ProjectResourcePollerCursorTests {
             pageResponse(#"[{"id":1,"updated_at":"2026-08-06T09:00:05Z"}]"#, page: 1, nextPage: 2),
             pageResponse(#"[{"id":2,"updated_at":"2026-08-06T09:00:20Z"}]"#, page: 2, nextPage: nil),
         ])
-        let poller: ProjectResourcePoller = .init(transport: transport)
+        let poller: ProjectResourcePoller = .init(transport: transport, pageBudget: 2)
         let result: ResourcePollResult<SyntheticResource> = try await poller.poll(
             host: "https://gitlab.example.com",
             projectIdentifier: "42",
@@ -478,10 +484,9 @@ private final class ProjectResourcePollerCursorTests {
                 serverDate: "Thu, 06 Aug 2026 09:00:30 GMT"
             ),
         ])
-        let poller: ProjectResourcePoller = .init(
-            transport: transport,
-            localClock: { .init(timeIntervalSince1970: reference) }
-        )
+        // 凍住單調時鐘讓來回耗時恰為 0，單獨檢驗「以站台時刻封頂」。
+        let frozen: ContinuousClock.Instant = .now
+        let poller: ProjectResourcePoller = .init(transport: transport, monotonicNow: { frozen })
         let result: ResourcePollResult<SyntheticResource> = try await poller.poll(
             host: "https://gitlab.example.com",
             projectIdentifier: "42",
@@ -506,16 +511,17 @@ private final class ProjectResourcePollerCursorTests {
                 serverDate: "Thu, 06 Aug 2026 09:00:30 GMT"
             ),
         ])
-        // 本機時鐘每次讀取前進 8 秒 → 這次來回耗時量到 8 秒。
+        // 單調時鐘每次讀取前進 8 秒 → 這次來回耗時量到 8 秒。
         let ticks: Mutex<Int> = .init(0)
+        let origin: ContinuousClock.Instant = .now
         let poller: ProjectResourcePoller = .init(
             transport: transport,
-            localClock: {
+            monotonicNow: {
                 let tick: Int = ticks.withLock { count in
                     defer { count += 1 }
                     return count
                 }
-                return .init(timeIntervalSince1970: reference + Double(tick) * 8)
+                return origin.advanced(by: .seconds(tick * 8))
             }
         )
         let result: ResourcePollResult<SyntheticResource> = try await poller.poll(
@@ -773,6 +779,66 @@ private final class ProjectResourcePollerFailureTests {
             )
         }
         #expect(transport.requests.withLock { $0.isEmpty })
+    }
+
+    /// scheme 白名單必須真的擋得住非 HTTP scheme——放寬成「有 scheme 就好」時，
+    /// `ftp://…` 會帶著 `PRIVATE-TOKEN` 一路交給傳輸層。
+    @Test
+    func `non http scheme is rejected`() async {
+        let transport: ScriptedTransport = .init([])
+        let poller: ProjectResourcePoller = .init(transport: transport)
+        await #expect(throws: GitLabAPIError.self) {
+            let _: ResourcePollResult<SyntheticResource> = try await poller.poll(
+                host: "ftp://gitlab.example.com",
+                projectIdentifier: "42",
+                collection: .issues,
+                privateToken: "synthetic-read-token",
+                cursor: .init()
+            )
+        }
+        #expect(transport.requests.withLock { $0.isEmpty })
+    }
+
+    /// 連 scheme 都漏打時（設定檔常見），錯誤訊息**不得回退成原字串**——那字串可能整段帶著憑證。
+    @Test
+    func `unparsable host falls back to a fixed description`() async {
+        let secret: String = "synthetic-token-value"
+        let transport: ScriptedTransport = .init([])
+        let poller: ProjectResourcePoller = .init(transport: transport)
+        do {
+            let _: ResourcePollResult<SyntheticResource> = try await poller.poll(
+                host: "oauth2:\(secret)@gitlab.example.com",
+                projectIdentifier: "42",
+                collection: .issues,
+                privateToken: "synthetic-read-token",
+                cursor: .init()
+            )
+            Issue.record("解不出主機名的 host 應該被擋下")
+        } catch let GitLabAPIError.invalidURL(location) {
+            #expect(!location.contains(secret))
+            #expect(!location.contains("gitlab.example.com"))
+        } catch {
+            Issue.record("預期 invalidURL，實得 \(error)")
+        }
+    }
+
+    /// 每頁筆數的下界必須夾住：`per_page=0` 會讓站台每頁都回空陣列且沒有下一頁，
+    /// 於是游標永不推進、而每輪都回報 `complete`——一個永遠讀不到東西卻自稱正常的輪詢器。
+    @Test
+    func `page size and page budget are clamped from below`() async throws {
+        let transport: ScriptedTransport = .init([pageResponse("[]", page: 1, nextPage: nil)])
+        let poller: ProjectResourcePoller = .init(transport: transport, pageSize: 0, pageBudget: 0)
+        #expect(poller.pageSize == 1)
+        #expect(poller.pageBudget == 1)
+        let _: ResourcePollResult<SyntheticResource> = try await poller.poll(
+            host: "https://gitlab.example.com",
+            projectIdentifier: "42",
+            collection: .issues,
+            privateToken: "synthetic-read-token",
+            cursor: .init()
+        )
+        let request: HTTPRequest = try #require(transport.requests.withLock { $0.first })
+        #expect(queryItems(of: request)["per_page"] == "1")
     }
 
     /// host 帶 userinfo 時必須擋下：那會把讀取憑證送到別人家。

@@ -78,9 +78,16 @@ public struct ProjectResourcePoller: Sendable {
     /// 預設每頁筆數；直接取上限，讓同樣的翻頁預算涵蓋最多資源。
     public static let defaultPageSize: Int = 100
 
-    /// 預設單輪翻頁上限。有界是為了讓一輪輪詢的耗時可預期——待讀量在補資料的場景可以很大，
-    /// 一輪讀到底會把整個偵測週期卡住。
-    public static let defaultPageBudget: Int = 20
+    /// 預設單輪翻頁上限。
+    ///
+    /// 預設 **1**，因為游標只採信第一頁：第二頁以後不論讀幾頁，**游標都只前進一頁的量**，
+    /// 那些資源下一輪還會再讀一次。實測 5000 筆待讀（各佔不同秒、每頁 100）：預算 1 需 51 輪、
+    /// 51 次請求；預算 20 需 32 輪、640 次請求、傳輸量 12.8 倍——用 12.6 倍的請求換 1.6 倍的收斂速度，
+    /// 且每輪交出去的資源約九成五是下一輪還會再來一次的重複，全壓在去重層身上。
+    ///
+    /// 調高它換到的**不是游標進度、是本輪的交件量**：待讀的資源會更早被交給呼叫端，
+    /// 代價是請求數與重複量等比上升。補大量舊資料而且在意延遲時才值得調。
+    public static let defaultPageBudget: Int = 1
 
     /// 取不到站台時鐘時，本機時鐘往前扣的容差秒數。往前扣的方向只會造成重讀、不會造成漏讀。
     public static let defaultClockSkewAllowance: TimeInterval = 120
@@ -112,19 +119,28 @@ public struct ProjectResourcePoller: Sendable {
     /// 取不到站台時鐘時的本機時鐘來源；測試可注入固定值。
     private let localClock: @Sendable () -> Date
 
+    /// 量測請求來回耗時用的**單調**時鐘；測試可注入。
+    ///
+    /// 與 `localClock` 分開，是因為兩者要的東西不同：那個要的是「現在幾點」，這個要的是「過了多久」。
+    /// 牆上時鐘會被 NTP 校時、休眠喚醒或手動改時間整段跳，拿它相減得到的「耗時」可能是負的，
+    /// 於是上限退回成回應產生時刻——正好是這段程式碼要避開的值，而且不會有任何徵兆。
+    private let monotonicNow: @Sendable () -> ContinuousClock.Instant
+
     /// 以指定傳輸與翻頁參數建立；超出合理範圍的參數在此夾住，不往後傳。
     public init(
         transport: any HTTPTransport = URLSessionTransport(),
         pageSize: Int = ProjectResourcePoller.defaultPageSize,
         pageBudget: Int = ProjectResourcePoller.defaultPageBudget,
         clockSkewAllowance: TimeInterval = ProjectResourcePoller.defaultClockSkewAllowance,
-        localClock: @escaping @Sendable () -> Date = Date.init
+        localClock: @escaping @Sendable () -> Date = Date.init,
+        monotonicNow: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }
     ) {
         self.transport = transport
         self.pageSize = min(max(pageSize, 1), Self.maximumPageSize)
         self.pageBudget = max(pageBudget, 1)
         self.clockSkewAllowance = max(clockSkewAllowance, 0)
         self.localClock = localClock
+        self.monotonicNow = monotonicNow
     }
 
     /// 讀出游標之後被改動過的資源。
@@ -155,7 +171,7 @@ public struct ProjectResourcePoller: Sendable {
         var pagesRead: Int = 0
         var isTruncated: Bool = false
         while true {
-            let sentAt: Date = localClock()
+            let sentAt: ContinuousClock.Instant = monotonicNow()
             let response: HTTPResponse = try await send(
                 host: host,
                 projectIdentifier: projectIdentifier,
@@ -164,14 +180,14 @@ public struct ProjectResourcePoller: Sendable {
                 cursor: cursor,
                 page: page
             )
-            let roundTrip: TimeInterval = max(0, localClock().timeIntervalSince(sentAt))
+            let roundTrip: TimeInterval = Self.seconds(of: sentAt.duration(to: monotonicNow()))
             guard response.statusCode == 200 else {
                 throw GitLabAPIError.unexpectedStatus(response.statusCode)
             }
             // 起始時刻只取自**第一個**回應，且要往前扣掉那一次來回的耗時。
             // `Date` 標頭是**回應產生時**的站台時刻，晚於查詢取快照的瞬間；直接拿它當上限，
             // 上限就比快照晚了一整個請求的時間，那段期間提交的資料會落在新水位之下、再也讀不到。
-            // 扣掉本機量到的來回耗時（純時距、與時鐘域無關）即得一個必定不晚於快照的時刻。
+            // 扣掉單調時鐘量到的來回耗時（純時距、與時鐘域無關）即得一個必定不晚於快照的時刻。
             // 逐頁刷新同樣不行——上限會跟著往後漂，等於沒有上限。
             if walkStartedAt == nil {
                 walkStartedAt = Self.serverTime(of: response)?.addingTimeInterval(-roundTrip) ?? fallbackStartTime()
@@ -244,11 +260,19 @@ public struct ProjectResourcePoller: Sendable {
     }
 
     /// 解 ISO-8601 時間戳，帶不帶小數秒都收。
+    ///
+    /// 單一 style 即可：實測 `includingFractionalSeconds: true` 對無小數秒的形式與 `+08:00` 這類位移
+    /// 同樣解得開，兩邊都寬鬆。這裡不再多留一個「無小數秒」的後備分支——那條路走不到，
+    /// 沒有任何測試碰得到它，只會讓人以為防線比實際更厚。真正釘住兩種形狀都解得開的是測試，
+    /// 而不是分支數量；哪天 Foundation 收緊，那些測試就會轉紅。
     static func parseTimestamp(_ raw: String) -> Date? {
-        if let date: Date = try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(raw) {
-            return date
-        }
-        return try? Date.ISO8601FormatStyle(includingFractionalSeconds: false).parse(raw)
+        try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(raw)
+    }
+
+    /// 把 `Duration` 換算成秒。
+    static func seconds(of duration: Duration) -> TimeInterval {
+        let parts: (seconds: Int64, attoseconds: Int64) = duration.components
+        return TimeInterval(parts.seconds) + TimeInterval(parts.attoseconds) * 1e-18
     }
 
     /// 把解碼錯誤壓成一行可查的敘述：指出是哪個欄位、為什麼不合。
