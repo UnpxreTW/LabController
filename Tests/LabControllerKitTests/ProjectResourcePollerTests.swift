@@ -195,12 +195,19 @@ private final class ProjectResourcePollerTests {
         #expect(pages == ["1", "2", "3"])
     }
 
-    /// 平順情況：走完最後一頁、且沒有資源晚於本輪起始時刻 → 游標推到本輪讀到的最大時刻。
+}
+
+private final class ProjectResourcePollerCursorTests {
+
+    /// 單頁走完：第一頁就是全部，游標推到讀到的最大時刻——穩定運轉時的常態，推進毫無損失。
     @Test
-    func `undisturbed walk advances to the newest resource seen`() async throws {
+    func `single page walk advances to the newest resource seen`() async throws {
         let transport: ScriptedTransport = .init([
-            pageResponse(#"[{"id":1,"updated_at":"2026-08-06T09:00:05Z"}]"#, page: 1, nextPage: 2),
-            pageResponse(#"[{"id":2,"updated_at":"2026-08-06T09:00:20Z"}]"#, page: 2, nextPage: nil),
+            pageResponse(
+                #"[{"id":1,"updated_at":"2026-08-06T09:00:05Z"},{"id":2,"updated_at":"2026-08-06T09:00:20Z"}]"#,
+                page: 1,
+                nextPage: nil
+            ),
         ])
         let poller: ProjectResourcePoller = .init(transport: transport)
         let result: ResourcePollResult<SyntheticResource> = try await poller.poll(
@@ -214,18 +221,15 @@ private final class ProjectResourcePollerTests {
         #expect(result.cursor.watermark == Date(timeIntervalSince1970: reference + 20))
     }
 
-    /// 受擾情況：與上一例只差第二頁多一筆「本輪期間才被改動」的資源，游標就退回第一頁的最大時刻。
+    /// 多頁走完：即使走到最後一頁、即使全部資源都早於本輪起始時刻，游標仍只推到**第一頁**的最大時刻。
     ///
-    /// 這一對是刻意配對的——上一例證明推進得動，本例證明偵測得出差異。少了任一半都不足以說明保守推進有效。
+    /// 第二頁以後不能採信：翻頁途中若有資源被刪除或改動，後面的資源會整體前移而跨過已讀邊界，
+    /// 且刪除不留任何新時間戳、無從偵測。上一例（單頁）證明推進得動，本例證明多頁時確實只採信第一頁。
     @Test
-    func `a write during the walk holds the cursor at the first page`() async throws {
+    func `multi page walk advances only to the first page maximum`() async throws {
         let transport: ScriptedTransport = .init([
             pageResponse(#"[{"id":1,"updated_at":"2026-08-06T09:00:05Z"}]"#, page: 1, nextPage: 2),
-            pageResponse(
-                #"[{"id":2,"updated_at":"2026-08-06T09:00:20Z"},{"id":3,"updated_at":"2026-08-06T09:00:45Z"}]"#,
-                page: 2,
-                nextPage: nil
-            ),
+            pageResponse(#"[{"id":2,"updated_at":"2026-08-06T09:00:20Z"}]"#, page: 2, nextPage: nil),
         ])
         let poller: ProjectResourcePoller = .init(transport: transport)
         let result: ResourcePollResult<SyntheticResource> = try await poller.poll(
@@ -238,16 +242,20 @@ private final class ProjectResourcePollerTests {
         #expect(result.completion == .complete)
         #expect(result.cursor.watermark == Date(timeIntervalSince1970: reference + 5))
         // 資源本身照樣全數交出去，保守的只有游標。
-        #expect(result.elements.map(\.identifier) == [1, 2, 3])
+        #expect(result.elements.map(\.identifier) == [1, 2])
     }
 
-    /// 撞到翻頁預算：游標同樣只推到第一頁的最大時刻，狀態標成截斷。
+    /// 撞到翻頁預算時同樣只推第一頁。
+    ///
+    /// 預算刻意設 2 並讓第二頁的最大時刻晚於第一頁：若規則被改成「推到最後讀到的那頁」，本例會抓到，
+    /// 單頁的截斷案例則抓不到（那時兩者相等）。
     @Test
-    func `hitting the page budget truncates and advances only one page`() async throws {
+    func `hitting the page budget advances only to the first page maximum`() async throws {
         let transport: ScriptedTransport = .init([
             pageResponse(#"[{"id":1,"updated_at":"2026-08-06T09:00:05Z"}]"#, page: 1, nextPage: 2),
+            pageResponse(#"[{"id":2,"updated_at":"2026-08-06T09:00:20Z"}]"#, page: 2, nextPage: 3),
         ])
-        let poller: ProjectResourcePoller = .init(transport: transport, pageBudget: 1)
+        let poller: ProjectResourcePoller = .init(transport: transport, pageBudget: 2)
         let result: ResourcePollResult<SyntheticResource> = try await poller.poll(
             host: "https://gitlab.example.com",
             projectIdentifier: "42",
@@ -257,7 +265,84 @@ private final class ProjectResourcePollerTests {
         )
         #expect(result.completion == .truncated)
         #expect(result.cursor.watermark == Date(timeIntervalSince1970: reference + 5))
-        #expect(transport.requests.withLock { $0.count } == 1)
+        #expect(result.elements.map(\.identifier) == [1, 2])
+        // 預算用完就停，不再多要第三頁。
+        #expect(transport.requests.withLock { $0.count } == 2)
+    }
+
+    /// 本輪起始時刻只取自**第一個**回應：逐頁刷新會讓上限跟著往後漂，等於沒有上限。
+    ///
+    /// 第一頁的站台時刻 09:00:10 早於該頁最大值 09:00:30，游標應被壓到 09:00:10；
+    /// 若改成每頁刷新，最後採用的會是第二頁的 09:01:00，游標就變成 09:00:30。
+    @Test
+    func `walk start is taken from the first response only`() async throws {
+        let transport: ScriptedTransport = .init([
+            pageResponse(
+                #"[{"id":1,"updated_at":"2026-08-06T09:00:30Z"}]"#,
+                page: 1,
+                nextPage: 2,
+                serverDate: "Thu, 06 Aug 2026 09:00:10 GMT"
+            ),
+            pageResponse(
+                #"[{"id":2,"updated_at":"2026-08-06T09:00:40Z"}]"#,
+                page: 2,
+                nextPage: nil,
+                serverDate: "Thu, 06 Aug 2026 09:01:00 GMT"
+            ),
+        ])
+        let poller: ProjectResourcePoller = .init(transport: transport)
+        let result: ResourcePollResult<SyntheticResource> = try await poller.poll(
+            host: "https://gitlab.example.com",
+            projectIdentifier: "42",
+            collection: .mergeRequests,
+            privateToken: "synthetic-read-token",
+            cursor: .init()
+        )
+        #expect(result.cursor.watermark == Date(timeIntervalSince1970: reference + 10))
+    }
+
+    /// 有東西可推進、卻被上限壓住而動不了，同樣是會自我重複的狀態，即使沒撞到翻頁預算也要報 `stalled`。
+    ///
+    /// 場景：站台沒送 `Date` 標頭、本機時鐘又落後站台一小時 → 起始時刻早於所有資源 → 游標永遠不動，
+    /// 而每一輪都會回報 `complete`，看起來像「什麼都沒發生」。
+    @Test
+    func `cursor blocked by a bogus clock reports a stall even when not truncated`() async throws {
+        let transport: ScriptedTransport = .init([
+            pageResponse(#"[{"id":1,"updated_at":"2026-08-06T09:00:20Z"}]"#, page: 1, nextPage: nil, serverDate: nil),
+        ])
+        let poller: ProjectResourcePoller = .init(
+            transport: transport,
+            localClock: { .init(timeIntervalSince1970: reference - 3600) }
+        )
+        let cursor: UpdatedAfterCursor = .init(watermark: .init(timeIntervalSince1970: reference))
+        let result: ResourcePollResult<SyntheticResource> = try await poller.poll(
+            host: "https://gitlab.example.com",
+            projectIdentifier: "42",
+            collection: .mergeRequests,
+            privateToken: "synthetic-read-token",
+            cursor: cursor
+        )
+        #expect(result.completion == .stalled)
+        #expect(result.cursor == cursor)
+    }
+
+    /// 反例配對：讀到的資源都還在游標那一秒內時，游標不動是正常的安靜輪次、不是卡住。
+    @Test
+    func `re reading the boundary second is not a stall`() async throws {
+        let transport: ScriptedTransport = .init([
+            pageResponse(#"[{"id":1,"updated_at":"2026-08-06T09:00:00.900Z"}]"#, page: 1, nextPage: nil),
+        ])
+        let poller: ProjectResourcePoller = .init(transport: transport)
+        let cursor: UpdatedAfterCursor = .init(watermark: .init(timeIntervalSince1970: reference))
+        let result: ResourcePollResult<SyntheticResource> = try await poller.poll(
+            host: "https://gitlab.example.com",
+            projectIdentifier: "42",
+            collection: .mergeRequests,
+            privateToken: "synthetic-read-token",
+            cursor: cursor
+        )
+        #expect(result.completion == .complete)
+        #expect(result.cursor == cursor)
     }
 
     /// 撞到預算又推不動游標＝下一輪會讀到一模一樣的內容再撞一次；必須具名為 `stalled`。
@@ -342,6 +427,10 @@ private final class ProjectResourcePollerTests {
         #expect(result.elements.isEmpty)
     }
 
+}
+
+private final class ProjectResourcePollerFailureTests {
+
     /// 非 200（例如 token 無權讀該專案）應拋狀態碼錯誤、不當成空集合帶過。
     @Test
     func `non success status is surfaced`() async {
@@ -408,6 +497,26 @@ private final class ProjectResourcePollerTests {
                 cursor: .init()
             )
         }
+    }
+
+    /// 少寫 scheme 但帶埠號的 host 必須擋下。
+    ///
+    /// 只檢查「有沒有 scheme」擋不住它：`gitlab.example.com:7071` 會被解析成 scheme 為
+    /// `gitlab.example.com`、host 為空，於是組出一個送不到任何地方的網址，直到連線層才失敗。
+    @Test
+    func `host missing its scheme is rejected`() async {
+        let transport: ScriptedTransport = .init([])
+        let poller: ProjectResourcePoller = .init(transport: transport)
+        await #expect(throws: GitLabAPIError.self) {
+            let _: ResourcePollResult<SyntheticResource> = try await poller.poll(
+                host: "gitlab.example.com:7071",
+                projectIdentifier: "42",
+                collection: .mergeRequests,
+                privateToken: "synthetic-read-token",
+                cursor: .init()
+            )
+        }
+        #expect(transport.requests.withLock { $0.isEmpty })
     }
 
     /// 組不出帶 scheme 的網址時拋網址錯誤、不發出任何請求。

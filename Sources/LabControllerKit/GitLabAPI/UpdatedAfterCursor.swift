@@ -34,12 +34,19 @@ public struct UpdatedAfterCursor: Sendable, Equatable, Hashable, Codable {
 
     /// 已確認讀完的水位；`nil` 代表尚未輪詢過、首輪不帶 `updated_after`（讀全集）。
     ///
-    /// 恆為整秒——建構時即取整，故此不變式由型別保證、不靠呼叫端自律。
+    /// 恆為整秒。取整發生在**每一條**建構路徑上，包含從儲存層解回來的那一條——合成的 `Decodable`
+    /// 初始化器會直接寫進儲存屬性、繞過取整，讓存過一輪的游標帶著小數位復活，型別保證就此失效。
     public let watermark: Date?
 
     /// 以水位建立；傳入值會先向下取整到整秒。
     public init(watermark: Date? = nil) {
         self.watermark = watermark.map(Self.flooredToSecond)
+    }
+
+    /// 自儲存層解回；一律經過 `init(watermark:)` 以維持整秒不變式。
+    public init(from decoder: any Decoder) throws {
+        let container: KeyedDecodingContainer<CodingKeys> = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(watermark: try container.decodeIfPresent(Date.self, forKey: .watermark))
     }
 
     /// 送給站台的 `updated_after` 參數值；`nil` 時整個參數省略、代表讀全集。
@@ -70,13 +77,17 @@ public struct UpdatedAfterCursor: Sendable, Equatable, Hashable, Codable {
     ///   - walkStartedAt: 本輪開始時的**站台**時鐘。水位不會越過這個時刻。
     /// - Returns: 推進後的水位；不會比原水位早。
     ///
-    /// `walkStartedAt` 這道上限治的是「查詢快照」與「交易提交」的順序差：資料庫可能存在一筆
-    /// `updated_at` 已經寫成某個較早時刻、但交易在我們的查詢跑完之後才提交的資料。它對本輪查詢
-    /// 不可見，卻帶著本輪水位之前的時間戳。水位若推到「現在」，這筆資料就永遠落在查詢範圍之外；
-    /// 壓在本輪起始時刻則保證它下一輪還在範圍內。
+    /// `walkStartedAt` 這道上限的作用範圍要講清楚，因為它很容易被高估：它保證的是
+    /// **「本輪期間才寫入的資料，下一輪仍在查詢範圍內」**——那些資料的時間戳晚於本輪起始，
+    /// 水位既然壓在起始時刻之下，就一定涵蓋得到。
     ///
-    /// 同理，本輪沒讀到任何資料時（`observed` 為 `nil`）水位**不推進**：空結果只證明查詢當下沒看到
-    /// 東西，不證明那段時間真的沒有東西被改過。
+    /// 它**擋不住**的是提交順序與時間戳順序不一致：一筆 `updated_at` 寫成較早時刻、交易卻在我們查詢
+    /// 之後才提交的資料，對本輪不可見，時間戳又可能已落在新水位之下，於是永遠查不到。要涵蓋這種情況
+    /// 得讓水位固定落後一段安全距離，本型別沒有這麼做（該距離取決於站台的交易時長，見
+    /// `ProjectResourcePoller` 的已知缺口）。
+    ///
+    /// 本輪沒讀到任何資料時（`observed` 為 `nil`）水位**不推進**，理由同上：空結果只證明查詢當下沒看到
+    /// 東西，不證明那段時間真的沒有東西被改過。不推進是這一層唯一能做的保守處置。
     public func advanced(to observed: Date?, noLaterThan walkStartedAt: Date) -> Self {
         guard let observed else {
             return self

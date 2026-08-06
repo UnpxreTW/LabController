@@ -16,33 +16,42 @@ import Foundation
 ///
 /// 本型別**無狀態**：游標由呼叫端保存、每輪傳入，推進後的值隨結果回傳（理由見 `ResourcePollResult`）。
 ///
-/// ## 排序方向為何固定 `asc`
+/// ## 位移分頁沒有快照，所以游標只信第一頁
 ///
-/// 翻頁期間集合會被改動，而位移分頁沒有快照。差別在改動把資源推向哪一端：
+/// 站台的分頁是 `LIMIT/OFFSET`，跨頁之間沒有一致性快照。翻頁途中集合被改動——某筆資源被更新而換位、
+/// 或被刪除、被移到別的專案——都會讓它後面的資源整體往前挪一格，於是某一筆恰好跨過已讀邊界，
+/// **本輪永遠讀不到它，而且沒有任何跡象**。這不只發生在更新：刪除同樣造成位移，卻連一個新的時間戳
+/// 都不會留下，任何「看有沒有更新的資料」的偵測法都抓不到。
 ///
-/// - `sort=desc`：剛被改的資源跳到第一頁。那頁已經讀過了，本輪看不到它；而游標會推到「本輪讀到的
-///   最大時刻」——正好越過它。**永久漏掉。**
-/// - `sort=asc`：剛被改的資源移到尾端，也就是還沒讀到的方向，本輪仍會遇到。
+/// 因此游標的推進**只採信第一頁**：
 ///
-/// 兩者都會因為前段資源被改動而讓後續資源整體前移一格、跨過已讀邊界；`asc` 的差別是這種漏讀**偵測得到**
-/// （見下），`desc` 的漏讀連跡象都沒有。
+/// - 第一頁是單一請求，也就是單一快照，不受任何位移影響。
+/// - `sort=asc` 保證比第一頁最大值更早的資源全部落在那一頁裡。
 ///
-/// ## 游標推進到哪一筆
+/// 於是「游標推到第一頁的最大值」是可以證明的：比它早的資源都確實讀過了。第二頁以後的資源照樣
+/// **原封不動交給呼叫端**，只是不拿來推游標——它們的時刻都晚於新游標，下一輪還會再出現一次，
+/// 由去重層吸收。
 ///
-/// - **平順情況**（讀到最後一頁，且沒有任何資源的 `updated_at` 晚於本輪起始時刻）：推進到本輪讀到的
-///   最大時刻。沒有改動發生過，整段都確實讀完了。
-/// - **受擾情況**（撞到翻頁預算，或讀到了本輪期間才被改動的資源）：只推進到**第一頁**的最大時刻。
-///   第一頁是單一請求、即單一快照，`asc` 排序保證比它更早的資源全在那一頁裡；比它晚的部分則不保證
-///   沒有被位移吃掉，於是不算數、下一輪重讀。代價是大量待讀時每輪只前進一頁，換到的是不漏。
+/// 實務上一輪只會有一頁（穩定運轉時每輪的異動遠少於一頁），此時第一頁的最大值就是全部的最大值、
+/// 推進毫無損失。多頁只發生在補大量舊資料的場合，那時每輪前進一頁，換到的是一筆都不漏。
 ///
-/// 兩種情況都再壓上「不晚於本輪起始的**站台**時鐘」這道上限（理由見
-/// `UpdatedAfterCursor.advanced(to:noLaterThan:)`）。用站台時鐘而非本機時鐘是因為本機時鐘若走快，
-/// 上限就形同虛設；取不到站台時鐘時退回本機時鐘並往前扣一段容差。
+/// 排序方向因此不是偏好而是前提：`desc` 會把剛改動的資源放到第一頁（已讀過的方向），
+/// 且第一頁的最大值是全集最大值，游標一次就跳到最前面，跨過的全部都讀不回來。
+///
+/// ## 上限：不晚於本輪起始的站台時鐘
+///
+/// 推進值再壓上「本輪第一個回應所帶的站台時刻」。用站台時鐘而非本機時鐘，是因為本機時鐘若走快，
+/// 上限就形同虛設；取不到站台時鐘時退回本機時鐘並往前扣一段容差（往前扣只會造成重讀）。
 ///
 /// ## 已知缺口
 ///
-/// - 站台的位移分頁在 `updated_at` 上沒有第二排序鍵，真正的解是 keyset 分頁，但 16.2 的 keyset 只支援
-///   以 `id` 排序、與本游標不相容。上面的保守推進是在可用工具內能做到的最好結果，不是消滅了該問題。
+/// - **提交順序與時間戳順序不一致**：資料庫可能存在一筆 `updated_at` 寫成較早時刻、但交易在我們查詢
+///   之後才提交的資料。它對本輪不可見，時間戳卻可能已落在新游標之下，於是永遠查不到。站台時鐘那道
+///   上限**擋不住這種情況**（它只保證「本輪期間才寫入」的資料下一輪還在範圍內）。真正的解是讓游標
+///   固定落後一段安全距離；該距離取多少取決於站台的交易時長，本片沒有依據可訂，留給接上儲存層時決定。
+/// - 站台的位移分頁在 `updated_at` 上沒有第二排序鍵。上面「只信第一頁」的規則不受此影響，
+///   但同一秒內的資源筆數若超過一頁，第一頁就切在平手群中間；此時整秒重讀（見 `UpdatedAfterCursor`）
+///   是唯一的保護。
 /// - 未處理站台的速率限制回應（429）；目前一律當非預期狀態碼拋出。
 public struct ProjectResourcePoller: Sendable {
 
@@ -61,6 +70,12 @@ public struct ProjectResourcePoller: Sendable {
 
     /// 單次請求逾時；這類查詢應快速失敗，與 long-poll 的 `jobs/request` 相反。
     public static let requestTimeout: TimeInterval = 30
+
+    /// 可接受的網址 scheme。
+    ///
+    /// 只檢查「有沒有 scheme」擋不住少寫 scheme 的 host：`gitlab.example.com:7071` 會被解析成
+    /// scheme 為 `gitlab.example.com`、host 為空，一路組成一個送不到任何地方的網址才失敗。
+    static let acceptedSchemes: Set<String> = ["http", "https"]
 
     /// 實際採用的每頁筆數，已夾在 `1 ... maximumPageSize`。
     ///
@@ -98,7 +113,7 @@ public struct ProjectResourcePoller: Sendable {
     /// 讀出游標之後被改動過的資源。
     ///
     /// - Parameters:
-    ///   - host: 站台網址，結尾多餘的斜線會先修剪。
+    ///   - host: 站台網址，須帶 `http`／`https` scheme；結尾多餘的斜線會先修剪。
     ///   - projectIdentifier: 專案數字 ID，或以 `群組/專案` 形式的完整路徑（會做百分比編碼）。
     ///   - collection: 要輪詢的集合。
     ///   - privateToken: 具讀取權的存取 token，放在 `PRIVATE-TOKEN` 標頭。
@@ -106,7 +121,7 @@ public struct ProjectResourcePoller: Sendable {
     /// - Returns: 資源、推進後的游標，以及本輪走到哪裡收尾。
     /// - Throws: `GitLabAPIError`——網址組不出、狀態碼非 200、本體解不開，或分頁標頭不一致。
     ///
-    /// 回傳的資源可能包含上一輪已見過的內容，去重是下游職責；**游標保守、寧可重讀**的理由見型別說明。
+    /// 回傳的資源可能包含上一輪已見過的內容，去重是下游職責；**游標只採信第一頁**的理由見型別說明。
     public func poll<Element: Decodable & UpdatedAtCarrying>(
         host: String,
         projectIdentifier: String,
@@ -117,7 +132,6 @@ public struct ProjectResourcePoller: Sendable {
         let decoder: JSONDecoder = Self.makeResourceDecoder()
         var elements: [Element] = []
         var firstPageMaximum: Date?
-        var observedMaximum: Date?
         var walkStartedAt: Date?
         var page: Int = 1
         var pagesRead: Int = 0
@@ -134,18 +148,19 @@ public struct ProjectResourcePoller: Sendable {
             guard response.statusCode == 200 else {
                 throw GitLabAPIError.unexpectedStatus(response.statusCode)
             }
-            // 起始時刻取自**第一個**回應：它早於後續所有請求，用它當上限對每一頁都成立。
-            walkStartedAt = walkStartedAt ?? Self.serverTime(of: response) ?? fallbackStartTime()
+            // 起始時刻只取自**第一個**回應。後面每一頁都晚於它，用它當上限對整輪都成立；
+            // 逐頁刷新會讓上限跟著往後漂，等於沒有上限。
+            if walkStartedAt == nil {
+                walkStartedAt = Self.serverTime(of: response) ?? fallbackStartTime()
+            }
             guard let batch: [Element] = try? decoder.decode([Element].self, from: response.body) else {
                 throw GitLabAPIError.undecodableBody
             }
             let marker: PageMarker = try .init(response: response, requestedPage: page)
             elements.append(contentsOf: batch)
-            let batchMaximum: Date? = batch.map(\.updatedAt).max()
             if pagesRead == 0 {
-                firstPageMaximum = batchMaximum
+                firstPageMaximum = batch.map(\.updatedAt).max()
             }
-            observedMaximum = [observedMaximum, batchMaximum].compactMap { $0 }.max()
             pagesRead += 1
             guard let nextPage: Int = marker.nextPage else {
                 break
@@ -157,12 +172,13 @@ public struct ProjectResourcePoller: Sendable {
             page = nextPage
         }
         let startedAt: Date = walkStartedAt ?? fallbackStartTime()
-        let sawLaterWrite: Bool = observedMaximum.map { $0 > startedAt } ?? false
-        let candidate: Date? = (isTruncated || sawLaterWrite) ? firstPageMaximum : observedMaximum
-        let advanced: UpdatedAfterCursor = cursor.advanced(to: candidate, noLaterThan: startedAt)
+        let advanced: UpdatedAfterCursor = cursor.advanced(to: firstPageMaximum, noLaterThan: startedAt)
+        // 沒有上限時本來會不會動？用來分辨「本來就沒東西可推進」與「有東西、卻被上限壓住不動」。
+        let hadRoomToAdvance: Bool = cursor.advanced(to: firstPageMaximum, noLaterThan: .distantFuture) != cursor
         let completion: PollCompletion = Self.completion(
             isTruncated: isTruncated,
-            movedCursor: advanced != cursor
+            didAdvance: advanced != cursor,
+            hadRoomToAdvance: hadRoomToAdvance
         )
         return .init(elements: elements, cursor: advanced, completion: completion)
     }
@@ -212,15 +228,16 @@ public struct ProjectResourcePoller: Sendable {
         return formatter.date(from: raw)
     }
 
-    /// 由「有沒有撞到預算」與「游標動了沒」判本輪收尾狀態。
+    /// 由「有沒有撞到預算」「游標動了沒」「本來動不動得了」三者判本輪收尾狀態。
     ///
-    /// 撞到預算又推不動游標＝下一輪會讀到一模一樣的內容再撞一次；這種會自我重複的狀態必須具名，
-    /// 否則每一輪各自看起來都成功了。
-    static func completion(isTruncated: Bool, movedCursor: Bool) -> PollCompletion {
-        guard isTruncated else {
-            return .complete
+    /// 游標沒動有兩種完全不同的意思。**本來就沒東西可推進**（沒讀到資料，或讀到的都還在游標那一秒內）
+    /// 是正常的安靜輪次；**有東西可推進卻沒動**則代表下一輪會讀到一模一樣的內容、再次沒動，
+    /// 如此反覆而每一輪各自看起來都成功了。後者必須具名為 `stalled`，撞到預算而原地踏步同理。
+    static func completion(isTruncated: Bool, didAdvance: Bool, hadRoomToAdvance: Bool) -> PollCompletion {
+        guard didAdvance else {
+            return (isTruncated || hadRoomToAdvance) ? .stalled : .complete
         }
-        return movedCursor ? .truncated : .stalled
+        return isTruncated ? .truncated : .complete
     }
 
     /// 取不到站台時鐘時的替代起始時刻：本機時鐘往前扣容差。
@@ -244,7 +261,9 @@ public struct ProjectResourcePoller: Sendable {
             throw GitLabAPIError.invalidURL(projectIdentifier)
         }
         let path: String = "\(base)/api/v4/projects/\(identifier)/\(collection.pathComponent)"
-        guard var components: URLComponents = .init(string: path), components.scheme != nil else {
+        guard var components: URLComponents = .init(string: path),
+              let scheme: String = components.scheme,
+              Self.acceptedSchemes.contains(scheme.lowercased()) else {
             throw GitLabAPIError.invalidURL(host)
         }
         var items: [URLQueryItem] = [

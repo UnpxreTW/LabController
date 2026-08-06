@@ -115,4 +115,26 @@ private final class UpdatedAfterCursorTests {
         let data: Data = try JSONEncoder().encode(cursor)
         #expect(try JSONDecoder().decode(UpdatedAfterCursor.self, from: data) == cursor)
     }
+
+    /// 解碼路徑同樣要取整——合成的初始化器會直接寫進儲存屬性、繞過取整，讓帶小數位的游標從儲存層復活。
+    ///
+    /// 後果不只是不變式失效：`advanced` 的推進判定靠相等比較，帶小數位的水位會讓「動了沒」判錯。
+    @Test
+    func `decoding floors a fractional watermark`() throws {
+        let raw: Data = try JSONEncoder().encode(
+            ["watermark": Date(timeIntervalSince1970: Self.reference + 0.987)]
+        )
+        let decoded: UpdatedAfterCursor = try JSONDecoder().decode(UpdatedAfterCursor.self, from: raw)
+        #expect(decoded.watermark == Date(timeIntervalSince1970: Self.reference))
+    }
+
+    /// 缺 `watermark` 鍵時解成「尚未輪詢過」，不是解碼失敗。
+    @Test
+    func `decoding an empty object yields an unset cursor`() throws {
+        let decoded: UpdatedAfterCursor = try JSONDecoder().decode(
+            UpdatedAfterCursor.self,
+            from: .init("{}".utf8)
+        )
+        #expect(decoded.watermark == nil)
+    }
 }
