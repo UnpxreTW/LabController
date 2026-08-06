@@ -61,7 +61,13 @@ private final class ProjectResourcePollerClockTests {
             ),
         ])
         let frozen: ContinuousClock.Instant = .now
-        let poller: ProjectResourcePoller = .init(transport: transport, monotonicNow: { frozen })
+        // 本機時鐘必須也釘死：沿用真實牆上時鐘的話，等真實時間走過 fixture 時刻加上容差之後，
+        // 「上限與本機時鐘對不對得上」就會翻面，這個測試會從某一刻起永久失敗。
+        let poller: ProjectResourcePoller = .init(
+            transport: transport,
+            localClock: { .init(timeIntervalSince1970: pollReference + 10) },
+            monotonicNow: { frozen }
+        )
         let cursor: UpdatedAfterCursor = .init(watermark: .init(timeIntervalSince1970: pollReference + 10))
         let result: ResourcePollResult<PollSyntheticResource> = try await poller.poll(
             host: "https://gitlab.example.com",
@@ -320,8 +326,9 @@ private final class ProjectResourcePollerFailureTests {
 
     /// 少寫 scheme 但帶埠號的 host 必須擋下。
     ///
-    /// `gitlab.example.com:7071` 會被解析成 scheme 為 `gitlab.example.com`、**host 為 nil**，
-    /// 擋下它的是主機名那道守衛（不是 scheme 白名單）。少了守衛就會組出一個送不到任何地方的網址。
+    /// `gitlab.example.com:7071` 會被解析成 scheme 為 `gitlab.example.com`、host 為 nil；
+    /// 守衛鏈先判 scheme，所以**攔下它的是白名單**（`gitlab.example.com` 不在其中）。
+    /// 主機名那道守衛負責的是另一種形狀——scheme 合法、主機名卻是空的，見 `https:///gitlab` 那例。
     @Test
     func `host missing its scheme is rejected`() async {
         let transport: PollScriptedTransport = .init([])

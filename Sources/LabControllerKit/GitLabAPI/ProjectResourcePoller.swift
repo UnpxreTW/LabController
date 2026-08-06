@@ -81,9 +81,10 @@ public struct ProjectResourcePoller: Sendable {
     /// 預設單輪翻頁上限。
     ///
     /// 預設 **1**，因為游標只採信第一頁：第二頁以後不論讀幾頁，**游標都只前進一頁的量**，
-    /// 那些資源下一輪還會再讀一次。實測 5000 筆待讀（各佔不同秒、每頁 100）：預算 1 需 51 輪、
-    /// 51 次請求；預算 20 需 32 輪、640 次請求、傳輸量 12.8 倍——用 12.6 倍的請求換 1.6 倍的收斂速度，
-    /// 且每輪交出去的資源約九成五是下一輪還會再來一次的重複，全壓在去重層身上。
+    /// 那些資源下一輪還會再讀一次。實測 5000 筆待讀（各佔不同秒、每頁 100）：
+    /// 兩種預算下**游標**都要約 51 輪才走完（每輪一頁，這是規則決定的、調不動）；
+    /// 差別在「資源全部交件完畢」——預算 1 需 51 輪／51 次請求，預算 20 需 32 輪／640 次請求，
+    /// 約 12.5 倍的請求與傳輸量換 1.6 倍的交件速度，且每輪交出去的約九成五是下一輪還會再來一次的重複。
     ///
     /// 調高它換到的**不是游標進度、是本輪的交件量**：待讀的資源會更早被交給呼叫端，
     /// 代價是請求數與重複量等比上升。補大量舊資料而且在意延遲時才值得調。
@@ -171,6 +172,7 @@ public struct ProjectResourcePoller: Sendable {
         var elements: [Element] = []
         var firstPageMaximum: Date?
         var walkStartedAt: Date?
+        var walkSentAtWallClock: Date?
         var usedFallbackStart: Bool = false
         var page: Int = 1
         var pagesRead: Int = 0
@@ -197,6 +199,7 @@ public struct ProjectResourcePoller: Sendable {
             // 扣掉單調時鐘量到的來回耗時（純時距、與時鐘域無關）即得一個必定不晚於快照的時刻。
             // 逐頁刷新同樣不行——上限會跟著往後漂，等於沒有上限。
             if walkStartedAt == nil {
+                walkSentAtWallClock = wallSentAt
                 if let serverTime: Date = Self.serverTime(of: response) {
                     walkStartedAt = serverTime.addingTimeInterval(-roundTrip)
                 } else {
@@ -245,10 +248,18 @@ public struct ProjectResourcePoller: Sendable {
         // 而 stalled 一旦開始誤報就沒有人會再認真看它。
         //
         // 但「來自站台」不等於「堪用」：前端快取或時鐘停住的節點會發出固定或過期的 `Date`，
-        // 上限就此凍住、游標永遠不動，而每輪都回報一切正常。因此再比一次本機時鐘：
-        // 兩者相差超過容差即視為不堪用（容差本來就是「我們容忍多少時鐘分歧」這個量）。
-        let capIsUnusable: Bool = usedFallbackStart
-            || localClock().timeIntervalSince(startedAt) > clockSkewAllowance + Self.requestTimeout
+        // 上限就此凍住、游標永遠不動，而每輪都回報一切正常。因此拿它跟本機時鐘對一次。
+        //
+        // 對比的兩端都必須取自**同一個瞬間附近**：用第一個請求送出前的本機讀值（`walkSentAtWallClock`）
+        // 對上由第一個回應導出的上限。拿走完所有頁之後的時刻去比，會把整趟翻頁的耗時全記成時鐘分歧，
+        // 於是「補舊資料所以調高翻頁預算」本身就會誤報。
+        //
+        // 取絕對值：站台時鐘**走在本機之前**那一側同樣要攔——上限落到未來等於上限不存在，
+        // 而那是會無聲漏資料的方向，只比單邊等於放過它。
+        // 容差之外再放一個請求逾時：兩端本來就隔著一次來回，加上 `Date` 標頭只有整秒精度。
+        let capIsUnusable: Bool = usedFallbackStart || abs(
+            (walkSentAtWallClock ?? localClock()).timeIntervalSince(startedAt)
+        ) > clockSkewAllowance + Self.requestTimeout
         let cappedByUnusableClock: Bool = firstPageWouldAdvance && capIsUnusable
         let completion: PollCompletion = Self.completion(
             isTruncated: isTruncated,
