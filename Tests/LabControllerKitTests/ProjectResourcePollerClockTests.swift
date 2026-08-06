@@ -185,6 +185,41 @@ private final class ProjectResourcePollerClockTests {
         #expect(result.elements.count == 1)
     }
 
+    /// 時鐘狀況**不得壓下**該報的 `stalled`：同秒群塞滿第一頁時，即使回應完全沒有 `Date` 標頭，
+    /// 仍然要報 `stalled`。
+    ///
+    /// 這一例補的是另一個方向。其他測試都在驗「時鐘問題不可以**造成** stalled」，若判定式被寫成
+    /// 「同秒群 **且** 時鐘沒問題」才算卡住，那些測試全數照樣通過——而真正卡在代理後面、
+    /// 連 `Date` 都收不到的站台，就永遠不會出聲。
+    @Test
+    func `a tie group still stalls when the response carries no date header`() async throws {
+        let transport: PollScriptedTransport = .init([
+            pollPageResponse(
+                #"[{"id":1,"updated_at":"2026-08-06T09:00:00.900Z"}]"#,
+                page: 1,
+                nextPage: 2,
+                serverDate: nil
+            ),
+        ])
+        let poller: ProjectResourcePoller = .init(
+            transport: transport,
+            pageBudget: 1,
+            localClock: { .init(timeIntervalSince1970: pollReference + 600) }
+        )
+        let cursor: UpdatedAfterCursor = .init(watermark: .init(timeIntervalSince1970: pollReference))
+        let result: ResourcePollResult<PollSyntheticResource> = try await poller.poll(
+            host: "https://gitlab.example.com",
+            projectIdentifier: "42",
+            collection: .mergeRequests,
+            privateToken: "synthetic-read-token",
+            cursor: cursor
+        )
+        #expect(result.completion == .stalled)
+        #expect(result.cursor == cursor)
+        // 沒有站台時鐘可對，上限不可信——但那不影響上面該報的 stalled。
+        #expect(!result.capIsTrustworthy)
+    }
+
     /// 反例配對：撞到預算、游標也沒動，但原因只是上限比資料晚了不到一秒——回 `truncated`，不是 `stalled`。
     ///
     /// `Date` 標頭只有整秒精度，健康站台在 09:00:10.8 發出的就是 `09:00:10`；此時本輪推不動游標，
