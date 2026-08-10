@@ -66,10 +66,14 @@ public struct JobRequestClient: Sendable {
         let cursor: String? = response.headerValue("X-GitLab-Last-Update") ?? lastUpdate
         switch response.statusCode {
         case 201:
-            guard let job: JobResponse = try? JSONDecoder().decode(JobResponse.self, from: response.body) else {
-                throw GitLabAPIError.undecodableBody
+            // 走 do/catch 而非 `try?`：`JobResponse` 現在只有 `id`／`token` 缺席才會走到這裡，
+            // 而缺哪一個決定了下一步。`try?` 把那個資訊丟掉，log 上只剩「body 解不開」。
+            do {
+                let job: JobResponse = try JSONDecoder().decode(JobResponse.self, from: response.body)
+                return .init(outcome: .assigned(job), lastUpdate: cursor)
+            } catch {
+                throw GitLabAPIError.undecodableBody(codingPath: Self.codingPath(of: error))
             }
-            return .init(outcome: .assigned(job), lastUpdate: cursor)
         case 204:
             return .init(outcome: .noJob, lastUpdate: cursor)
         default:
@@ -198,6 +202,25 @@ public struct JobRequestClient: Sendable {
         default:
             throw GitLabAPIError.unexpectedStatus(response.statusCode)
         }
+    }
+
+    /// 從解碼錯誤取出「解不開的位置」，只回鍵名路徑。
+    ///
+    /// **不碰任何值**：這個字串會被寫進 log，而 body 裡有 job token 與變數值。
+    static func codingPath(of error: any Error) -> String {
+        guard let error = error as? DecodingError else { return "" }
+        let path: [any CodingKey]
+        switch error {
+        case let .typeMismatch(_, context), let .valueNotFound(_, context):
+            path = context.codingPath
+        case let .keyNotFound(key, context):
+            path = context.codingPath + [key]
+        case let .dataCorrupted(context):
+            path = context.codingPath
+        @unknown default:
+            return ""
+        }
+        return path.map(\.stringValue).joined(separator: ".")
     }
 
     /// 從站台回的 `Range: 0-<n>` 取出下一段的起始位移。

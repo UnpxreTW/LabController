@@ -99,7 +99,7 @@ private final class RunnerRegistrationClientTests {
     func `register throws on undecodable body`() async {
         let transport: RecordingTransport = .init(response: .init(statusCode: 201, body: .init("not json".utf8)))
         let client: RunnerRegistrationClient = .init(transport: transport)
-        await #expect(throws: GitLabAPIError.undecodableBody) {
+        await #expect(throws: GitLabAPIError.undecodableBody(codingPath: "")) {
             try await client.register(host: "https://gitlab.example.com", registrationToken: "synthetic-registration")
         }
     }
