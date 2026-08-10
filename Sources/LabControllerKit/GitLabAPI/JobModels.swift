@@ -49,38 +49,26 @@ public struct JobVariable: Decodable, Sendable, Equatable {
     }
 }
 
-/// job 的一個執行步驟；本片只保留形狀，實際執行由後續切片承接。
-public struct JobStep: Decodable, Sendable, Equatable {
+/// 印出來只給名稱與旗標、不給值。
+///
+/// 一個變數是不是秘密，看的是站台有沒有標 `masked`——但**沒標的也未必能公開**（部署憑證
+/// 靠設定紀律而非旗標的情況很常見）。預設反射會把每個 `value` 原樣吐出來，因此這裡一律
+/// 不印值，不分是否 masked。
+extension JobVariable: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
 
-    /// 步驟名稱，例如 `script`、`after_script`。
-    public let name: String
-
-    /// 該步驟要跑的指令列。
-    public let script: [String]
-
-    /// 失敗是否可容忍。
-    public let allowFailure: Bool
-
-    /// 以顯式欄位建立（測試用）。
-    public init(name: String, script: [String], allowFailure: Bool = false) {
-        self.name = name
-        self.script = script
-        self.allowFailure = allowFailure
+    /// 只描述名稱與旗標。
+    public var description: String {
+        "JobVariable(key: \(key), masked: \(masked), file: \(file))"
     }
 
-    /// 解碼；`script` 缺席視為空、`allow_failure` 缺席視為 false。
-    public init(from decoder: any Decoder) throws {
-        let container: KeyedDecodingContainer<CodingKeys> = try decoder.container(keyedBy: CodingKeys.self)
-        self.name = try container.decode(String.self, forKey: .name)
-        self.script = try container.decodeIfPresent([String].self, forKey: .script) ?? []
-        self.allowFailure = try container.decodeIfPresent(Bool.self, forKey: .allowFailure) ?? false
+    /// 與 `description` 相同；debug 情境更需要這層保護，不是更不需要。
+    public var debugDescription: String {
+        description
     }
 
-    /// 對應站台端欄位名（snake_case）。
-    private enum CodingKeys: String, CodingKey {
-        case name
-        case script
-        case allowFailure = "allow_failure"
+    /// `dump` 走 `Mirror`、繞過上面兩者，故一併收口。
+    public var customMirror: Mirror {
+        .init(self, children: ["key": key, "masked": masked, "file": file], displayStyle: .struct)
     }
 }
 
@@ -88,6 +76,10 @@ public struct JobStep: Decodable, Sendable, Equatable {
 public struct GitInfo: Decodable, Sendable, Equatable {
 
     /// 倉庫網址。
+    ///
+    /// ⚠️ **可能內嵌憑證**：站台慣例會把 job token 放進 userinfo（`user:token@host/...`），
+    /// 因此這個字串不可原樣印出或寫進 trace。本型別的 `description` 已把 userinfo 抹掉，
+    /// 但要送去別的地方前請自己再確認一次。
     public let repoURL: String
 
     /// 分支或 tag 名稱。
@@ -114,6 +106,15 @@ public struct GitInfo: Decodable, Sendable, Equatable {
         self.sha = try container.decodeIfPresent(String.self, forKey: .sha) ?? ""
     }
 
+    /// 站台送了 `git_info`、但少了取碼所需的座標。
+    ///
+    /// 與寬鬆解碼分工：解碼刻意不拋（少一個鍵就丟掉整個 job 更糟），但「缺了什麼」必須有
+    /// 人接手。缺 `repo_url` 或 `sha` 時 clone 根本做不到，留到執行階段才炸，錯誤訊息會跟
+    /// 「站台沒給座標」完全連不起來。由 `JobResponse.unreadableFields` 承接、收件時擋下。
+    public var hasIncompleteCoordinates: Bool {
+        repoURL.isEmpty || sha.isEmpty
+    }
+
     /// 對應站台端欄位名（snake_case）。
     private enum CodingKeys: String, CodingKey {
         case repoURL = "repo_url"
@@ -122,60 +123,59 @@ public struct GitInfo: Decodable, Sendable, Equatable {
     }
 }
 
-/// `POST /api/v4/jobs/request` 回 201 時的 job 內容。
-///
-/// 刻意寬鬆解碼：站台端還會回 `artifacts`／`cache`／`services`／`job_info` 等欄位，
-/// 本片不實作對應行為、解碼時一律忽略（未知欄位不致失敗）。欄位形狀待對凍齡站台
-/// 實測後錄成 fixture 校準。
-public struct JobResponse: Decodable, Sendable, Equatable {
+/// 印出來的網址一律抹掉 userinfo。
+extension GitInfo: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
 
-    /// job 識別碼；trace 回寫與狀態回報都用它組路徑。
-    public let id: Int
-
-    /// 此 job 專屬的短命 token；trace／狀態回報用它認證，與 runner 認證 token 不同。
-    public let token: String
-
-    /// job 環境變數。
-    public let variables: [JobVariable]
-
-    /// job 執行步驟。
-    public let steps: [JobStep]
-
-    /// git 座標；站台端未提供時為 nil。
-    public let gitInfo: GitInfo?
-
-    /// 以顯式欄位建立（測試用）。
-    public init(
-        id: Int,
-        token: String,
-        variables: [JobVariable] = [],
-        steps: [JobStep] = [],
-        gitInfo: GitInfo? = nil
-    ) {
-        self.id = id
-        self.token = token
-        self.variables = variables
-        self.steps = steps
-        self.gitInfo = gitInfo
+    /// 抹掉 userinfo 的網址加上 ref／sha。
+    public var description: String {
+        "GitInfo(repo: \(Self.withoutUserInfo(repoURL)), ref: \(ref), sha: \(sha))"
     }
 
-    /// 解碼；集合類欄位缺席一律視為空，不因此判定回應無效。
-    public init(from decoder: any Decoder) throws {
-        let container: KeyedDecodingContainer<CodingKeys> = try decoder.container(keyedBy: CodingKeys.self)
-        self.id = try container.decode(Int.self, forKey: .id)
-        self.token = try container.decode(String.self, forKey: .token)
-        self.variables = try container.decodeIfPresent([JobVariable].self, forKey: .variables) ?? []
-        self.steps = try container.decodeIfPresent([JobStep].self, forKey: .steps) ?? []
-        self.gitInfo = try container.decodeIfPresent(GitInfo.self, forKey: .gitInfo)
+    /// 與 `description` 相同；debug 情境更需要這層保護，不是更不需要。
+    public var debugDescription: String {
+        description
     }
 
-    /// 對應站台端欄位名（snake_case）。
-    private enum CodingKeys: String, CodingKey {
-        case id
-        case token
-        case variables
-        case steps
-        case gitInfo = "git_info"
+    /// `dump` 走 `Mirror`、繞過上面兩者，故一併收口。
+    public var customMirror: Mirror {
+        .init(
+            self,
+            children: ["repoURL": Self.withoutUserInfo(repoURL), "ref": ref, "sha": sha],
+            displayStyle: .struct
+        )
+    }
+
+    /// 把 `scheme://user:secret@host/...` 的 userinfo 段換掉。
+    ///
+    /// 三個容易寫錯的地方，都刻意處理過：
+    /// - **scheme 可以沒有**（`user:token@host/path` 是合法的 scp 式寫法）——只認
+    ///   `://` 的話這種形狀會原樣印出憑證。
+    /// - **只看 authority 段**（到第一個 `/`／`?`／`#` 為止）——`@` 出現在 path 裡是
+    ///   正常的（`repo@v1.git`），照砍會把路徑吃掉。
+    /// - **取 authority 內最後一個 `@`**——密碼未經 URL 編碼而含 `@` 時，取第一個會讓
+    ///   密碼的後半截留在輸出裡。
+    ///
+    /// authority 內沒有 `@` 就沒有 userinfo，原樣回傳。
+    private static func withoutUserInfo(_ url: String) -> String {
+        let afterScheme: String.Index = schemeEnd(of: url) ?? url.startIndex
+        let rest: Substring = url[afterScheme...]
+        let authorityEnd: String.Index = rest.firstIndex { $0 == "/" || $0 == "?" || $0 == "#" }
+            ?? rest.endIndex
+        let authority: Substring = rest[..<authorityEnd]
+        guard let at: String.Index = authority.lastIndex(of: "@") else { return url }
+        return url[..<afterScheme] + "***@" + url[url.index(after: at)...]
+    }
+
+    /// 找出開頭那個 `scheme://` 的結束位置；開頭不是合法 scheme 就回 nil。
+    ///
+    /// 不能用「字串裡第一個 `://`」：未經 URL 編碼的密碼裡可以有 `://`，命中它會讓切點落
+    /// 在憑證中間，後續的 authority 切法跟著全錯、最後把整串原樣印出去。scheme 依 RFC 3986
+    /// 必須以字母開頭、其後只允許字母／數字／`+`／`-`／`.`。
+    private static func schemeEnd(of url: String) -> String.Index? {
+        let scheme: Substring = url.prefix { $0.isLetter || $0.isNumber || $0 == "+" || $0 == "-" || $0 == "." }
+        guard let first: Character = scheme.first, first.isLetter else { return nil }
+        guard url[scheme.endIndex...].hasPrefix("://") else { return nil }
+        return url.index(scheme.endIndex, offsetBy: 3)
     }
 }
 
