@@ -25,7 +25,7 @@ public struct EventType: RawRepresentable, Hashable, Sendable, Codable, CustomSt
     /// 但會是兩個彼此無關的型別——去重、節流與統計各自為政，且沒有任何一處會報錯。
     /// 逐純量的判準：擋掉控制與格式字元（Cc／Cf）、default-ignorable 純量、半形空格以外的
     /// 所有空白，以及點字空方。**這不是「兩個識別字不可能長得一樣」的證明**——同形異碼
-    /// （拉丁 `a` 與西里爾 `а`）、連續兩個半形空格依然是看起來相同的兩個型別，那條線靠組態
+    /// （拉丁 `a` 與西里爾 `а`）、連續兩個半形空格都仍是看起來相同的兩個型別，那條線靠組態
     /// 審查。另一項代價：variation selector 與 ZWJ 也在 default-ignorable 之列，帶修飾的
     /// emoji 序列會被拒。
     public init?(rawValue: String) {
