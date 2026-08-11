@@ -8,8 +8,32 @@
 
 import Foundation
 
+/// 拒絕跟隨轉址的 task delegate。
+///
+/// 無狀態、無儲存屬性，故 `@unchecked Sendable` 成立（`NSObject` 子類無法自動推導）。
+private final class RedirectRefusingDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+
+    /// 一律不跟隨轉址：回傳 `nil` 讓 3xx 回應原樣交給呼叫端。
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest
+    ) async -> URLRequest? {
+        nil
+    }
+}
+
 /// 以 URLSession 實作的正式傳輸；逐次無狀態請求、TCP 連線復用交由 URLSession 管理。
+///
+/// **不跟隨轉址。** URLSession 預設會自動跟隨，而它只對 `Authorization` 做跨主機剝除；
+/// 本模組的憑證走 `PRIVATE-TOKEN` 這類自訂標頭，**跨主機轉址時會原樣帶過去**——站台被改設定、
+/// DNS 被換、或有人在中間插一個 302，讀取憑證就這樣送到別人家，而呼叫端只會看到一次成功的請求。
+/// 拒絕跟隨之後，3xx 原樣回到上層、成為看得見的非預期狀態碼。
 public struct URLSessionTransport: HTTPTransport {
+
+    /// 共用的轉址拒絕器；無狀態，故單一實例即可。
+    private static let redirectRefusing: RedirectRefusingDelegate = .init()
 
     /// 全型別共用的 session。
     ///
@@ -27,6 +51,10 @@ public struct URLSessionTransport: HTTPTransport {
         let configuration: URLSessionConfiguration = .default
         configuration.timeoutIntervalForResource = 600
         configuration.waitsForConnectivity = false
+        // 不吃快取：輪詢的每一次請求都在問「現在怎麼樣」，被重播的一頁舊資料會讓游標永遠不動，
+        // 而分頁標頭一模一樣、任何一層都看不出來。連 `Date` 標頭都會跟著重播，上限也跟著凍住。
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
         return .init(configuration: configuration)
     }()
 
@@ -54,7 +82,10 @@ public struct URLSessionTransport: HTTPTransport {
         if let timeout: TimeInterval = request.timeout {
             urlRequest.timeoutInterval = timeout
         }
-        let (data, response): (Data, URLResponse) = try await session.data(for: urlRequest)
+        let (data, response): (Data, URLResponse) = try await session.data(
+            for: urlRequest,
+            delegate: Self.redirectRefusing
+        )
         guard let httpResponse: HTTPURLResponse = response as? HTTPURLResponse else {
             throw GitLabAPIError.invalidResponse
         }
