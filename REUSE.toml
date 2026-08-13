@@ -7,6 +7,7 @@ path = [
 	".github/dependabot.yml",
 	".gitignore",
 	"NOTICE",
+	"Package.resolved",
 	"README.md",
 ]
 precedence = "aggregate"
