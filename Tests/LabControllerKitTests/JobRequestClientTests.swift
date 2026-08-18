@@ -203,13 +203,27 @@ private final class JobRequestClientTests {
         let request: HTTPRequest = try #require(transport.requests.withLock { $0.first })
         #expect(request.url.absoluteString == "https://h.invalid/api/v4/jobs/request")
     }
-    /// 無 scheme 的 host 應被擋下。
+    /// 無 scheme 的 host 應被擋下；錯誤帶的是收斂過的位置描述、不是原字串。
     @Test
     func `host without scheme throws invalid url`() async throws {
         let transport: ScriptedTransport = .init([.init(statusCode: 204)])
         let client: JobRequestClient = .init(transport: transport)
-        await #expect(throws: GitLabAPIError.invalidURL("h.invalid")) {
+        await #expect(throws: GitLabAPIError.invalidURL(GitLabAPIError.unparsableLocation)) {
             _ = try await client.requestJob(host: "h.invalid", token: "t")
+        }
+    }
+
+    /// 帶憑證的 host 組不出網址時，錯誤裡不得出現那段憑證。
+    @Test
+    func `invalid host with credentials does not leak them`() async throws {
+        let transport: ScriptedTransport = .init([.init(statusCode: 204)])
+        let client: JobRequestClient = .init(transport: transport)
+        do {
+            _ = try await client.requestJob(host: "https://oauth2:glpat-synthetic@gitlab example.com", token: "t")
+            Issue.record("預期拋出 invalidURL")
+        } catch let GitLabAPIError.invalidURL(location) {
+            #expect(!location.contains("glpat-synthetic"))
+            #expect(!location.contains("oauth2"))
         }
     }
 }

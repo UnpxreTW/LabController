@@ -369,20 +369,6 @@ public struct ProjectResourcePoller: Sendable {
         return isTruncated ? .truncated : .complete
     }
 
-    /// 把網址字串收斂成可安全記錄的位置描述。
-    ///
-    /// **絕不把原字串放進錯誤**：`https://oauth2:<token>@gitlab.example.com` 這種形狀是合法輸入，
-    /// 原樣帶進 `invalidURL` 就等於把憑證寫進每一行 log 與每一份當機報告——那道守衛本來是要保護憑證的。
-    /// 只保留 scheme／host／port；連這些都取不出來時回一個固定字串，不回退到原值。
-    static func safeLocation(of urlString: String) -> String {
-        guard let components: URLComponents = .init(string: urlString), let host: String = components.host else {
-            return "<無法解析的網址>"
-        }
-        let scheme: String = components.scheme.map { "\($0)://" } ?? ""
-        let port: String = components.port.map { ":\($0)" } ?? ""
-        return "\(scheme)\(host)\(port)"
-    }
-
     /// 組出單頁請求並送出。
     private func send(
         host: String,
@@ -418,7 +404,7 @@ public struct ProjectResourcePoller: Sendable {
               // 讀取憑證卻會連同 PRIVATE-TOKEN 標頭一起送到別人家。
               components.user == nil,
               components.password == nil else {
-            throw GitLabAPIError.invalidURL(Self.safeLocation(of: host))
+            throw GitLabAPIError.invalidURL(GitLabAPIError.safeLocation(of: host))
         }
         // 修掉結尾**所有**斜線：只修一個的話 `…example.com//` 會組出 `//api/v4/…`，路徑多一層空片段。
         let base: String = .init(components.percentEncodedPath.reversed().drop { $0 == "/" }.reversed())
@@ -436,7 +422,7 @@ public struct ProjectResourcePoller: Sendable {
         }
         components.queryItems = items
         guard let url: URL = components.url else {
-            throw GitLabAPIError.invalidURL(Self.safeLocation(of: host))
+            throw GitLabAPIError.invalidURL(GitLabAPIError.safeLocation(of: host))
         }
         let request: HTTPRequest = .init(
             method: "GET",
