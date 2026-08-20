@@ -109,7 +109,7 @@ private final class RunnerRegistrationClientTests {
     func `register throws on invalid host`() async {
         let transport: RecordingTransport = .init(response: .init(statusCode: 201))
         let client: RunnerRegistrationClient = .init(transport: transport)
-        await #expect(throws: GitLabAPIError.invalidURL("")) {
+        await #expect(throws: GitLabAPIError.invalidURL(GitLabAPIError.unparsableLocation)) {
             try await client.register(host: "", registrationToken: "synthetic-registration")
         }
         #expect(transport.requests.withLock { $0.isEmpty })

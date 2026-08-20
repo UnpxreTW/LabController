@@ -6,10 +6,16 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
+import Foundation
+
 /// GitLab API 呼叫的錯誤模型；涵蓋網址組裝、回應形狀與狀態碼三類失敗。
 public enum GitLabAPIError: Error, Equatable, Sendable {
 
-    /// host 字串組不出帶 scheme 的合法網址。
+    /// host 字串組不出帶 scheme 的合法網址；附帶的是**收斂過的位置描述**，不是原字串。
+    ///
+    /// `https://oauth2:<token>@gitlab.example.com` 是合法輸入，而這條錯誤會被寫進 log 與當機報告——
+    /// 原字串照放等於把憑證一併寫進去，那道守衛本來是要保護憑證的。凡承載網址字串者一律經
+    /// `safeLocation(of:)` 產生（見該方法），呼叫端不自行組字串；不含網址的固定說明字面值不在此列。
     case invalidURL(String)
 
     /// 回應不是 HTTP 回應（傳輸層形狀異常）。
@@ -39,4 +45,25 @@ public enum GitLabAPIError: Error, Equatable, Sendable {
     /// 獨立成一個 case 而不併進 `invalidResponse`：分頁標頭壞掉時，回應本體通常是完全合法的一頁資料，
     /// 照收就是「只讀到第一頁」或「同一頁反覆讀」——兩者都不會有任何徵兆。此處拋錯是為了讓它出聲。
     case malformedPagination(String)
+}
+
+public extension GitLabAPIError {
+
+    /// 取不出 host 時的固定替代字串。
+    ///
+    /// 解不開就不回退到原值：解不開的字串一樣可能整段都是憑證，而「無法解析」本身就足以指出問題。
+    static let unparsableLocation: String = "<無法解析的網址>"
+
+    /// 把網址字串收斂成可安全記錄的位置描述：只保留 scheme／host／port。
+    ///
+    /// 使用者名稱、密碼、路徑與查詢字串全數捨棄——憑證可能出現在前兩者，也常被放進查詢字串。
+    /// 保留的三段足以分辨「打錯站台」與「網址組壞了」，這正是這條錯誤要回答的問題。
+    static func safeLocation(of urlString: String) -> String {
+        guard let components: URLComponents = .init(string: urlString), let host: String = components.host else {
+            return unparsableLocation
+        }
+        let scheme: String = components.scheme.map { "\($0)://" } ?? ""
+        let port: String = components.port.map { ":\($0)" } ?? ""
+        return "\(scheme)\(host)\(port)"
+    }
 }

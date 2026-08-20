@@ -245,7 +245,7 @@ public struct JobRequestClient: Sendable {
     ) async throws -> HTTPResponse {
         let base: String = host.hasSuffix("/") ? .init(host.dropLast()) : host
         guard let url: URL = .init(string: "\(base)/api/v4/\(path)"), url.scheme != nil else {
-            throw GitLabAPIError.invalidURL(host)
+            throw GitLabAPIError.invalidURL(GitLabAPIError.safeLocation(of: host))
         }
         let request: HTTPRequest = .init(
             method: method,
