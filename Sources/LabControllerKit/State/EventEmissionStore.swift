@@ -88,6 +88,39 @@ public actor EventEmissionStore {
         }
     }
 
+    /// 一次查多把鑰匙上次送出的時刻；從沒送過的鑰匙不會出現在結果裡。
+    ///
+    /// 存在理由＝**一批一裁**：``EventEmissionGate`` 對整批事件一起裁決，得先把這批鑰匙的時刻備齊
+    /// （逐則裁決會讓同批的重複全部放行，見該型別說明）。逐把呼叫 ``lastEmission(of:)`` 得到的答案
+    /// 相同，但每把都要重編一次語句；這裡編一次、逐把重綁。
+    ///
+    /// **不包在交易裡**：每一列各自讀得原子，而不同鑰匙之間本來就不互相參照——跨鑰匙的「同一瞬間」
+    /// 在這裡沒有意義。真正要留意的窗口在讀完之後、送出之前，那道窗不是交易關得掉的
+    /// （見 ``EventEmissionCoordinator`` 的已知缺口）。
+    ///
+    /// - Parameter keys: 要查的鑰匙。空集合直接回空結果、連語句都不編。
+    public func lastEmissions(of keys: Set<EventKey>) throws -> [EventKey: Date] {
+        guard !keys.isEmpty else { return [:] }
+        let statement: OpaquePointer = try Self.prepare(Self.selectSQL, on: handle, operation: "select")
+        defer { sqlite3_finalize(statement) }
+        var emissions: [EventKey: Date] = [:]
+        for key: EventKey in keys {
+            try Self.bind(key.rawValue, at: 1, of: statement, on: handle, operation: "select")
+            let stepResult: Int32 = sqlite3_step(statement)
+            switch stepResult {
+            case SQLITE_ROW:
+                emissions[key] = .init(timeIntervalSince1970: sqlite3_column_double(statement, 0))
+            case SQLITE_DONE:
+                break
+            default:
+                throw Self.statementError(on: handle, code: stepResult, operation: "select")
+            }
+            sqlite3_reset(statement)
+            sqlite3_clear_bindings(statement)
+        }
+        return emissions
+    }
+
     /// 記下某把鑰匙在某個時刻送出過。
     public func recordEmission(of key: EventKey, at date: Date) throws {
         try recordEmissions([key: date])
