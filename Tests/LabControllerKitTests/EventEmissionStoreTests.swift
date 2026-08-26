@@ -173,6 +173,37 @@ private final class EventEmissionStoreTests {
         }
     }
 
+    /// 批次查詢只回查得到的鑰匙；沒紀錄的不以任何預設值充數。
+    @Test
+    func `reads back only the keys that have a recorded time`() async throws {
+        let store: EventEmissionStore = try .init(at: databaseURL())
+        let recorded: EventKey = key(target: .issue(iid: 1))
+        let never: EventKey = key(target: .issue(iid: 2))
+        try await store.recordEmission(of: recorded, at: now)
+        let emissions: [EventKey: Date] = try await store.lastEmissions(of: [recorded, never])
+        #expect(emissions == [recorded: now])
+    }
+
+    /// 批次查詢與逐把查詢對同一份資料給同一個答案。
+    @Test
+    func `answers a batch the same way it answers one key at a time`() async throws {
+        let store: EventEmissionStore = try .init(at: databaseURL())
+        let first: EventKey = key(target: .mergeRequest(iid: 3))
+        let second: EventKey = key(target: .pipeline(identifier: 4))
+        try await store.recordEmissions([first: now, second: now.addingTimeInterval(90)])
+        let batched: [EventKey: Date] = try await store.lastEmissions(of: [first, second])
+        #expect(batched[first] == (try await store.lastEmission(of: first)))
+        #expect(batched[second] == (try await store.lastEmission(of: second)))
+    }
+
+    /// 空集合查回空結果。
+    @Test
+    func `reads back nothing for an empty set of keys`() async throws {
+        let store: EventEmissionStore = try .init(at: databaseURL())
+        try await store.recordEmission(of: key(target: .project), at: now)
+        #expect(try await store.lastEmissions(of: []).isEmpty)
+    }
+
     /// 本次測試獨用的資料庫檔位置。
     private func databaseURL() -> URL {
         directory.appendingPathComponent("\(UUID().uuidString).sqlite3")
