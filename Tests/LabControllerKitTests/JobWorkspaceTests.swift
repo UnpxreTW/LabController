@@ -166,7 +166,7 @@ private final class JobWorkspaceTests {
         #expect(try contents(of: checkoutEnvironment, in: workspace).contains("PATH") == false)
     }
 
-    /// 座標不全的 `git_info` 要當場擋下，不留給執行階段去煸。
+    /// 座標不全的 `git_info` 要當場擋下，不留給執行階段去爆。
     @Test
     func `rejects git info without the coordinates a checkout needs`() {
         let plan: JobPlan = .init(
