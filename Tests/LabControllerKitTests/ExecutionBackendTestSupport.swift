@@ -23,6 +23,12 @@ final class InMemoryExecutionBackend: ExecutionBackend {
         /// 依命令的第一個參數對應到要回的結果。
         var results: [String: CommandResult] = [:]
 
+        /// 由整條命令決定要回什麼；設了就先問它，回 nil 才退回 `results`。
+        ///
+        /// 存在理由是**同一個可執行檔跑不同東西**：真正的呼叫端把命令拼成「shell ＋ 腳本路徑」，
+        /// 每一道命令的第一個參數都一樣，光靠 `results` 分不出是哪一步。
+        var handler: (@Sendable ([String]) -> CommandResult?)?
+
         /// 焚毀時要拋的錯；不設即成功。
         var destroyError: ExecutionBackendError?
     }
@@ -96,6 +102,9 @@ final class InMemoryExecutionBackend: ExecutionBackend {
                 throw ExecutionBackendError.unknownGuest(guest)
             }
             state.executed.append(command)
+            if let handled: CommandResult = state.script.handler?(command) {
+                return handled
+            }
             guard let name: String = command.first, let result: CommandResult = state.script.results[name] else {
                 return .init(command: command, exitCode: 0)
             }
