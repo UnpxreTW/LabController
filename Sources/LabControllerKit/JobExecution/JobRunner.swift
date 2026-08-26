@@ -87,7 +87,7 @@ public struct JobRunner: Sendable {
                 return .init(outcome: .systemFailed, failureReason: .runnerSystemFailure, trace: trace.finish(),
                              warnings: plan.warnings)
             }
-            // 收拾失敗不改寫結果，但也不呑掉：留下來的環境仍在 `ps()` 上看得到，回收孤兒
+            // 收拾失敗不改寫結果，但也不吞掉：留下來的環境仍在 `ps()` 上看得到，回收孤兒
             // 本來就是後端那一側的事（見 `ExecutionBackend.withGuest` 的說明）。
             trace.write("環境沒能焚毀：\(error)")
             return .init(outcome: report.outcome, failureReason: report.failureReason, exitCode: report.exitCode,
@@ -154,7 +154,7 @@ public struct JobRunner: Sendable {
         return report(plan, outcome: .jobFailed, reason: .scriptFailure, exitCode: firstFailureExitCode, trace: trace)
     }
 
-    /// 收尾成一份結果；trace 在此刻收攝，之後不再寫入。
+    /// 收尾成一份結果；trace 在此刻收攏，之後不再寫入。
     private func report(
         _ plan: JobPlan,
         outcome: JobOutcome,
@@ -205,9 +205,9 @@ public struct JobRunner: Sendable {
             released += stream.append(line + "\n")
         }
 
-        /// 收攝並取回全文；緩衝區裡押著的尾巴在此放行。
+        /// 收攏並取回全文；緩衝區裡押著的尾巴在此放行。
         ///
-        /// 放行的內容併回已放行的那份，所以收攝之後還能再寫、再收一次——收拾階段還要補一行的
+        /// 放行的內容併回已放行的那份，所以收攏之後還能再寫、再收一次——收拾階段還要補一行的
         /// 那條路徑走的就是這個。
         func finish() -> String {
             released += stream.flush()
