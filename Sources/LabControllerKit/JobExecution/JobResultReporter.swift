@@ -143,16 +143,37 @@ public struct JobResultReporter: Sendable {
                     acceptance: .notAcknowledged, traceIsComplete: traceIsComplete, updateAttempts: attempts
                 )
             }
-            try await wait(acknowledgement.updateInterval ?? configuration.updateRetryInterval)
+            try await wait(retryInterval(suggestedBy: acknowledgement.updateInterval))
         }
+    }
+
+    /// 決定兩次終態之間要等多久：站台的建議只在它是個能用的秒數時採信。
+    ///
+    /// 建議值原封來自回應標頭，`inf`、負數、或大到讓這條迴圈實質停住的值都是合法的字串輸入。
+    /// 這種值不當成錯誤處理——它不影響這件 job 本身的結果，退回本機預設節奏即可，站台再說一次
+    /// 就是了。上限也一併夾住：一個有限但過大的建議同樣會讓終態遲遲寫不進去。
+    ///
+    /// - Parameter suggestion: 站台建議的間隔（秒）；`nil` 代表沒建議。
+    /// - Returns: 實際要等的秒數。
+    private func retryInterval(suggestedBy suggestion: TimeInterval?) -> TimeInterval {
+        guard let suggestion, suggestion.isFinite, suggestion >= 0 else {
+            return configuration.updateRetryInterval
+        }
+        return min(suggestion, configuration.maximumUpdateRetryInterval)
     }
 
     /// 正式路徑的等待：真的睡指定秒數。
     ///
-    /// - Parameter seconds: 要睡多久；負值當成不睡。
+    /// 負值、`inf`、`NaN`、以及換算成奈秒後放不進 `UInt64` 的值一律當成不睡：`UInt64` 對這些
+    /// 值不是拋錯而是直接讓整個行程死掉，而這支被呼叫的位置正是「把終態寫回站台」的重送迴圈，
+    /// 死在那裡等於終態永遠寫不進去。真正該把外部值夾在合理範圍內的是呼叫端，這裡只保證不死。
+    ///
+    /// - Parameter seconds: 要睡多久；不是有限非負秒數時當成不睡。
     @Sendable
     public static func sleep(_ seconds: TimeInterval) async throws {
-        try await Task.sleep(nanoseconds: .init(max(0, seconds) * 1_000_000_000))
+        let nanoseconds: TimeInterval = max(0, seconds) * 1_000_000_000
+        guard nanoseconds.isFinite, nanoseconds < TimeInterval(UInt64.max) else { return }
+        try await Task.sleep(nanoseconds: .init(nanoseconds))
     }
 
     /// 送 log 的三種收法；只給本型別內部用。

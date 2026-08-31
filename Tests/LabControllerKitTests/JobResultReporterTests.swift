@@ -205,6 +205,79 @@ private final class JobResultReporterTests {
         #expect(waits.withLock { $0 } == [2])
     }
 
+    /// 站台建議一個秒數但帶著小數：原樣採信，不會被換算成整數的路徑吃掉。
+    @Test
+    func `waits a fractional interval as suggested`() async throws {
+        let transport: QueuedTransport = .init([
+            .init(statusCode: 202),
+            .init(statusCode: 202, headers: ["X-GitLab-Trace-Update-Interval": "7.5"]),
+            .init(statusCode: 200),
+        ])
+        let waits: Mutex<[TimeInterval]> = .init([])
+        let reporter: JobResultReporter = .init(
+            client: .init(transport: transport),
+            wait: { seconds in waits.withLock { $0.append(seconds) } }
+        )
+        _ = try await reporter.report(.init(outcome: .completed, exitCode: 0, trace: "hello"), to: target)
+        #expect(waits.withLock { $0 } == [7.5])
+    }
+
+    /// 站台給的建議間隔不是個能用的秒數（`inf`／`NaN`／負數）：退回本機預設節奏，不照做。
+    @Test(arguments: ["inf", "nan", "-5"])
+    func `falls back to the configured interval for an unusable suggestion`(_ header: String) async throws {
+        let transport: QueuedTransport = .init([
+            .init(statusCode: 202),
+            .init(statusCode: 202, headers: ["X-GitLab-Trace-Update-Interval": header]),
+            .init(statusCode: 200),
+        ])
+        let waits: Mutex<[TimeInterval]> = .init([])
+        let reporter: JobResultReporter = .init(
+            client: .init(transport: transport),
+            configuration: .init(updateRetryInterval: 2),
+            wait: { seconds in waits.withLock { $0.append(seconds) } }
+        )
+        let delivery: JobReportDelivery = try await reporter.report(
+            .init(outcome: .completed, exitCode: 0, trace: "hello"), to: target
+        )
+        #expect(delivery.acceptance == .written)
+        #expect(waits.withLock { $0 } == [2])
+    }
+
+    /// 站台建議一個大到讓終態實質寫不進去的間隔：夾在本側的採信上限，不照做。
+    @Test
+    func `caps an excessive suggested interval`() async throws {
+        let transport: QueuedTransport = .init([
+            .init(statusCode: 202),
+            .init(statusCode: 202, headers: ["X-GitLab-Trace-Update-Interval": "1e12"]),
+            .init(statusCode: 200),
+        ])
+        let waits: Mutex<[TimeInterval]> = .init([])
+        let reporter: JobResultReporter = .init(
+            client: .init(transport: transport),
+            configuration: .init(maximumUpdateRetryInterval: 30),
+            wait: { seconds in waits.withLock { $0.append(seconds) } }
+        )
+        _ = try await reporter.report(.init(outcome: .completed, exitCode: 0, trace: "hello"), to: target)
+        #expect(waits.withLock { $0 } == [30])
+    }
+
+    /// 採信上限被設得比本機預設等待還小時不生效：預設值是本側自己訂的，不該被上限壓掉。
+    @Test
+    func `never caps below the configured interval`() {
+        let configuration: JobReportingConfiguration = .init(
+            updateRetryInterval: 10, maximumUpdateRetryInterval: 1
+        )
+        #expect(configuration.maximumUpdateRetryInterval == 10)
+    }
+
+    /// 正式路徑的等待收到不能換算成奈秒的值時直接返回——它一旦死掉，終態就永遠寫不進去。
+    @Test
+    func `returns without sleeping for an unusable duration`() async throws {
+        for seconds: TimeInterval in [.infinity, .nan, -1, .greatestFiniteMagnitude] {
+            try await JobResultReporter.sleep(seconds)
+        }
+    }
+
     /// 站台一直只收下不寫入：送到次數上限就如實回「沒被確認」，不無限敲。
     @Test
     func `stops resending after the update attempt limit`() async throws {

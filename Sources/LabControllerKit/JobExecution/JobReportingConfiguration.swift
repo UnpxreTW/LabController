@@ -33,6 +33,13 @@ public struct JobReportingConfiguration: Sendable, Equatable {
     /// 站台沒給建議間隔時，兩次終態之間等多久（秒）。
     public let updateRetryInterval: TimeInterval
 
+    /// 站台建議的間隔最多採信到幾秒。
+    ///
+    /// 建議間隔來自回應標頭，是站台（以及它前面那層代理）說了算的外部輸入，本側沒有任何依據
+    /// 假設它落在合理範圍內：一個過大的值會讓這條重送迴圈實質停住，而終態沒寫進去的那段時間
+    /// 這件 job 在站台上一直算執行中、佔著併發額度。採信歸採信，上限由本側訂。
+    public let maximumUpdateRetryInterval: TimeInterval
+
     /// trace 位移對不上時，最多重同步幾次。
     ///
     /// 站台在 416 裡會告訴我們它實際收到哪裡，照著續傳通常一次就對上；反覆對不上代表兩邊
@@ -45,16 +52,20 @@ public struct JobReportingConfiguration: Sendable, Equatable {
     ///   - traceChunkBytes: 單次 trace 回寫的上限。
     ///   - maximumUpdateAttempts: 終態送出的次數上限。
     ///   - updateRetryInterval: 站台未建議間隔時的等待秒數。
+    ///   - maximumUpdateRetryInterval: 站台建議間隔的採信上限。
     ///   - maximumResyncAttempts: 重同步次數上限。
     public init(
         traceChunkBytes: Int = 128 * 1024,
         maximumUpdateAttempts: Int = 5,
         updateRetryInterval: TimeInterval = 3,
+        maximumUpdateRetryInterval: TimeInterval = 60,
         maximumResyncAttempts: Int = 3
     ) {
         self.traceChunkBytes = max(1, traceChunkBytes)
         self.maximumUpdateAttempts = max(1, maximumUpdateAttempts)
         self.updateRetryInterval = max(0, updateRetryInterval)
+        // 上限低於預設等待時，採信上限反而會把本機自己的預設值壓掉；取兩者較大的那個。
+        self.maximumUpdateRetryInterval = max(self.updateRetryInterval, maximumUpdateRetryInterval)
         self.maximumResyncAttempts = max(0, maximumResyncAttempts)
     }
 }
