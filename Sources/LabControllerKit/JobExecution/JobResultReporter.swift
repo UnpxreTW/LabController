@@ -88,8 +88,11 @@ public struct JobResultReporter: Sendable {
             if acknowledgement.needsResync {
                 // 站台在 416 裡帶著它實際收到的位置，那是唯一的續傳依據；沒帶就無從得知
                 // 該從哪裡接下去，硬猜只會把同一段重複寫進別人的 log 中間。
-                guard let resumption: Int = acknowledgement.nextOffset, resumption <= content.count,
-                      resyncs < configuration.maximumResyncAttempts else {
+                guard
+                    let resumption: Int = acknowledgement.nextOffset,
+                    resumption <= content.count,
+                    resyncs < configuration.maximumResyncAttempts
+                else {
                     return .givenUp
                 }
                 resyncs += 1
@@ -99,7 +102,10 @@ public struct JobResultReporter: Sendable {
             // 站台說收到哪裡就從哪裡續，沒說就照本側送出的量推進。位置沒有往前走時停手：
             // 那代表這一段沒被收下，而照原位再送一次就是一個永遠不會結束的迴圈。
             let resumption: Int = acknowledgement.nextOffset ?? end
-            guard resumption > offset, resumption <= content.count else { return .givenUp }
+            guard
+                resumption > offset,
+                resumption <= content.count
+            else { return .givenUp }
             offset = resumption
         }
         return .sent
@@ -156,7 +162,11 @@ public struct JobResultReporter: Sendable {
     /// - Parameter suggestion: 站台建議的間隔（秒）；`nil` 代表沒建議。
     /// - Returns: 實際要等的秒數。
     private func retryInterval(suggestedBy suggestion: TimeInterval?) -> TimeInterval {
-        guard let suggestion, suggestion.isFinite, suggestion >= 0 else {
+        guard
+            let suggestion,
+            suggestion.isFinite,
+            suggestion >= 0
+        else {
             return configuration.updateRetryInterval
         }
         return min(suggestion, configuration.maximumUpdateRetryInterval)
@@ -172,7 +182,10 @@ public struct JobResultReporter: Sendable {
     @Sendable
     public static func sleep(_ seconds: TimeInterval) async throws {
         let nanoseconds: TimeInterval = max(0, seconds) * 1_000_000_000
-        guard nanoseconds.isFinite, nanoseconds < TimeInterval(UInt64.max) else { return }
+        guard
+            nanoseconds.isFinite,
+            nanoseconds < TimeInterval(UInt64.max)
+        else { return }
         try await Task.sleep(nanoseconds: .init(nanoseconds))
     }
 
