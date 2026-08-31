@@ -82,13 +82,25 @@ internal enum NymphRequest: Encodable, Equatable, Sendable {
         /// 額外環境變數。
         internal var environment: [String: String]
 
-        /// 對應線上欄位名。
+        /// 對應線上欄位名；同名者一併列出，屬性改名時線上鍵才不會跟著動。
         private enum CodingKeys: String, CodingKey {
+
+            /// 線上鍵 `id`；屬性名依「識別字不縮寫」展開，兩側靠這一行對上。
             case identifier = "id"
+
+            /// 線上鍵 `command`。
             case command
+
+            /// 線上鍵 `timeoutSeconds`。
             case timeoutSeconds
+
+            /// 線上鍵 `standardInput`。
             case standardInput
+
+            /// 線上鍵 `workingDirectory`。
             case workingDirectory
+
+            /// 線上鍵 `environment`。
             case environment
         }
     }
@@ -108,6 +120,8 @@ internal enum NymphRequest: Encodable, Equatable, Sendable {
 
         /// 對應線上欄位名。
         private enum CodingKeys: String, CodingKey {
+
+            /// 線上鍵 `id`；屬性名依「識別字不縮寫」展開，兩側靠這一行對上。
             case identifier = "id"
         }
     }
@@ -121,9 +135,13 @@ internal enum NymphRequest: Encodable, Equatable, Sendable {
         /// true 時直接硬停，不等它自己收尾。
         internal var force: Bool
 
-        /// 對應線上欄位名。
+        /// 對應線上欄位名；同名者一併列出，屬性改名時線上鍵才不會跟著動。
         private enum CodingKeys: String, CodingKey {
+
+            /// 線上鍵 `id`；屬性名依「識別字不縮寫」展開，兩側靠這一行對上。
             case identifier = "id"
+
+            /// 線上鍵 `force`。
             case force
         }
     }

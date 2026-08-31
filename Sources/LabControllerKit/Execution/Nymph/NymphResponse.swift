@@ -42,10 +42,16 @@ internal enum NymphResponse: Decodable, Equatable, Sendable {
         /// guest 的 IP；還沒解出或根本沒接網路時為 nil。
         internal var IP: String?
 
-        /// 對應線上欄位名。
+        /// 對應線上欄位名；同名者一併列出，屬性改名時線上鍵才不會跟著動。
         private enum CodingKeys: String, CodingKey {
+
+            /// 線上鍵 `id`；屬性名依「識別字不縮寫」展開，兩側靠這一行對上。
             case identifier = "id"
+
+            /// 線上鍵 `state`。
             case state
+
+            /// 線上鍵 `ip`；屬性名依「縮寫詞全大寫」寫成 `IP`。
             case IP = "ip"
         }
     }
@@ -91,14 +97,28 @@ internal enum NymphResponse: Decodable, Equatable, Sendable {
         /// 已經開了幾秒。
         internal var uptimeSeconds: Int
 
-        /// 對應線上欄位名。
+        /// 對應線上欄位名；同名者一併列出，屬性改名時線上鍵才不會跟著動。
         private enum CodingKeys: String, CodingKey {
+
+            /// 線上鍵 `id`；屬性名依「識別字不縮寫」展開，兩側靠這一行對上。
             case identifier = "id"
+
+            /// 線上鍵 `state`。
             case state
+
+            /// 線上鍵 `ip`；屬性名依「縮寫詞全大寫」寫成 `IP`。
             case IP = "ip"
+
+            /// 線上鍵 `golden`。
             case golden
+
+            /// 線上鍵 `cpus`。
             case cpus
+
+            /// 線上鍵 `memoryGiB`。
             case memoryGiB
+
+            /// 線上鍵 `uptimeSeconds`。
             case uptimeSeconds
         }
     }
@@ -129,9 +149,13 @@ internal enum NymphResponse: Decodable, Equatable, Sendable {
         /// 恆為 true；查無此 guest 走 ``ToolError``、不走這裡。
         internal var destroyed: Bool
 
-        /// 對應線上欄位名。
+        /// 對應線上欄位名；同名者一併列出，屬性改名時線上鍵才不會跟著動。
         private enum CodingKeys: String, CodingKey {
+
+            /// 線上鍵 `id`；屬性名依「識別字不縮寫」展開，兩側靠這一行對上。
             case identifier = "id"
+
+            /// 線上鍵 `destroyed`。
             case destroyed
         }
     }
