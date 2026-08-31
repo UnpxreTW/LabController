@@ -46,7 +46,10 @@ internal final class LoopbackSocketServer: Sendable {
                 bind(listener, rebound, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
-        guard bound == 0, listen(listener, 1) == 0 else {
+        guard
+            bound == 0,
+            listen(listener, 1) == 0
+        else {
             let code: Int32 = errno
             close(listener)
             throw POSIXError(.init(rawValue: code) ?? .EIO)

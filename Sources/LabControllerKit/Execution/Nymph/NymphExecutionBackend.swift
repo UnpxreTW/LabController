@@ -67,7 +67,7 @@ public struct NymphExecutionBackend: ExecutionBackend {
             readinessTimeoutSeconds: configuration.readinessTimeoutSeconds
         )))
         guard case let .spawn(result) = response else { throw Self.unexpected(response, verb: "spawn", guest: nil) }
-        let guest: GuestIdentifier = .init(result.id)
+        let guest: GuestIdentifier = .init(result.identifier)
         guard result.state == .ready else {
             try? await destroy(guest)
             throw ExecutionBackendError.guestNotReady(guest, state: Self.guestState(from: result.state))
@@ -115,20 +115,20 @@ public struct NymphExecutionBackend: ExecutionBackend {
     /// - Throws: 查無此 guest 時 ``ExecutionBackendError/unknownGuest(_:)``；其餘見
     ///   ``ExecutionBackendError``。
     public func status(of guest: GuestIdentifier) async throws -> GuestSummary {
-        let response: NymphResponse = try await exchange(.status(.init(id: guest.rawValue)))
+        let response: NymphResponse = try await exchange(.status(.init(identifier: guest.rawValue)))
         guard case let .status(result) = response else { throw Self.unexpected(response, verb: "status", guest: guest) }
         return summary(from: result.summary)
     }
 
     /// 清掉一台 guest。
     ///
-    /// **查無此 guest 當成功**：本側協議要求焚毀是幂等的，而對面把「沒有這個 id」回成錯誤——
+    /// **查無此 guest 當成功**：本側協議要求焚毀是冪等的，而對面把「沒有這個 id」回成錯誤——
     /// 兩者的差就在這一行吃掉。收拾路徑常被走兩次，而第二次要的正是「已經沒有了」。
     ///
     /// - Parameter guest: 識別碼。
     /// - Throws: ``ExecutionBackendError``。
     public func destroy(_ guest: GuestIdentifier) async throws {
-        let response: NymphResponse = try await exchange(.destroy(.init(id: guest.rawValue, force: true)))
+        let response: NymphResponse = try await exchange(.destroy(.init(identifier: guest.rawValue, force: true)))
         if case let .toolError(error) = response, error.code == Self.noSuchIdentifierCode { return }
         guard case .destroy = response else { throw Self.unexpected(response, verb: "destroy", guest: guest) }
     }
@@ -259,7 +259,7 @@ public struct NymphExecutionBackend: ExecutionBackend {
         in guest: GuestIdentifier
     ) async throws -> CommandResult {
         let response: NymphResponse = try await exchange(.execute(.init(
-            id: guest.rawValue,
+            identifier: guest.rawValue,
             command: command,
             timeoutSeconds: nil,
             standardInput: standardInput,
@@ -303,7 +303,7 @@ public struct NymphExecutionBackend: ExecutionBackend {
     /// 當時序基準的地方另想辦法。
     private func summary(from wire: NymphResponse.SessionSummary) -> GuestSummary {
         .init(
-            identifier: .init(wire.id),
+            identifier: .init(wire.identifier),
             image: .alias(wire.golden),
             state: Self.guestState(from: wire.state),
             startedAt: now().addingTimeInterval(-Double(wire.uptimeSeconds))

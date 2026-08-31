@@ -34,13 +34,20 @@ internal enum NymphResponse: Decodable, Equatable, Sendable {
     internal struct SpawnResult: Decodable, Equatable, Sendable {
 
         /// 新 guest 的識別碼。
-        internal var id: String
+        internal var identifier: String
 
         /// 回來這一刻的狀態；等待逾時時會是尚未收斂的那一種。
         internal var state: NymphSessionState
 
         /// guest 的 IP；還沒解出或根本沒接網路時為 nil。
-        internal var ip: String?
+        internal var IP: String?
+
+        /// 對應線上欄位名。
+        private enum CodingKeys: String, CodingKey {
+            case identifier = "id"
+            case state
+            case IP = "ip"
+        }
     }
 
     /// `execute` 的結果。
@@ -64,13 +71,13 @@ internal enum NymphResponse: Decodable, Equatable, Sendable {
     internal struct SessionSummary: Decodable, Equatable, Sendable {
 
         /// 識別碼。
-        internal var id: String
+        internal var identifier: String
 
         /// 當下狀態。
         internal var state: NymphSessionState
 
         /// IP；未解出為 nil。
-        internal var ip: String?
+        internal var IP: String?
 
         /// 開這個 guest 用的基底別名。
         internal var golden: String
@@ -83,6 +90,17 @@ internal enum NymphResponse: Decodable, Equatable, Sendable {
 
         /// 已經開了幾秒。
         internal var uptimeSeconds: Int
+
+        /// 對應線上欄位名。
+        private enum CodingKeys: String, CodingKey {
+            case identifier = "id"
+            case state
+            case IP = "ip"
+            case golden
+            case cpus
+            case memoryGiB
+            case uptimeSeconds
+        }
     }
 
     /// `list` 的結果。
@@ -106,10 +124,16 @@ internal enum NymphResponse: Decodable, Equatable, Sendable {
     internal struct DestroyResult: Decodable, Equatable, Sendable {
 
         /// 被清掉的識別碼。
-        internal var id: String
+        internal var identifier: String
 
         /// 恆為 true；查無此 guest 走 ``ToolError``、不走這裡。
         internal var destroyed: Bool
+
+        /// 對應線上欄位名。
+        private enum CodingKeys: String, CodingKey {
+            case identifier = "id"
+            case destroyed
+        }
     }
 
     /// 對面的工具層失敗。

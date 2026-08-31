@@ -14,8 +14,8 @@
 /// 對面改了欄位而本側沒跟上時，壞的是測試，不是某一次真的送出去。
 ///
 /// **線上形狀是編譯器合成的那一種**：帶關聯值的列舉在 `Codable` 合成下編成
-/// `{"<case>":{"_0":{…}}}`，欄位名即屬性名（兩側都沒有設 key 轉換策略）。case 名與屬性名
-/// 因此都是協議的一部分，改名即改協議。
+/// `{"<case>":{"_0":{…}}}`，欄位名取自 `CodingKeys`（兩側都沒有設 key 轉換策略），本側因此
+/// 得以在屬性名不同於線上鍵名時逐欄釘住對應。case 名與線上欄位名都是協議的一部分，改名即改協議。
 ///
 /// **參數型別做成巢狀**：它們對這則請求以外的任何地方都沒有意義，攤成頂層型別只是讓五個
 /// 只有這裡用得到的名字佔住整個模組的命名空間。
@@ -65,7 +65,7 @@ internal enum NymphRequest: Encodable, Equatable, Sendable {
     internal struct ExecuteParams: Encodable, Equatable, Sendable {
 
         /// 目標 guest 的識別碼。
-        internal var id: String
+        internal var identifier: String
 
         /// 命令，逐個參數。
         internal var command: [String]
@@ -81,6 +81,16 @@ internal enum NymphRequest: Encodable, Equatable, Sendable {
 
         /// 額外環境變數。
         internal var environment: [String: String]
+
+        /// 對應線上欄位名。
+        private enum CodingKeys: String, CodingKey {
+            case identifier = "id"
+            case command
+            case timeoutSeconds
+            case standardInput
+            case workingDirectory
+            case environment
+        }
     }
 
     /// `list` 的參數。
@@ -94,16 +104,27 @@ internal enum NymphRequest: Encodable, Equatable, Sendable {
     internal struct StatusParams: Encodable, Equatable, Sendable {
 
         /// 目標 guest 的識別碼。
-        internal var id: String
+        internal var identifier: String
+
+        /// 對應線上欄位名。
+        private enum CodingKeys: String, CodingKey {
+            case identifier = "id"
+        }
     }
 
     /// `destroy` 的參數。
     internal struct DestroyParams: Encodable, Equatable, Sendable {
 
         /// 目標 guest 的識別碼。
-        internal var id: String
+        internal var identifier: String
 
         /// true 時直接硬停，不等它自己收尾。
         internal var force: Bool
+
+        /// 對應線上欄位名。
+        private enum CodingKeys: String, CodingKey {
+            case identifier = "id"
+            case force
+        }
     }
 }
