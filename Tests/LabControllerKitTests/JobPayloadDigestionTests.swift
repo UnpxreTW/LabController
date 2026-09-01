@@ -120,6 +120,31 @@ private final class JobPayloadDecodingTests {
         #expect(job.unreadableFields == ["dependencies[].artifacts_file.filename"])
     }
 
+    /// 值為 null 的變數解成空字串：站台每次都會送至少一個這種變數，拋錯等於一件也接不了。
+    @Test
+    func `variable with a null value decodes as empty`() throws {
+        let job: JobResponse = try decodeJob(#"""
+        {"id":1,"token":"t","variables":[
+          {"key":"CI_PROJECT_CLASSIFICATION_LABEL","value":null,"masked":false,"public":true},
+          {"key":"CI_PROJECT_PATH","value":"group/app","masked":false}
+        ]}
+        """#)
+        #expect(job.variables.count == 2)
+        #expect(job.variables.first?.key == "CI_PROJECT_CLASSIFICATION_LABEL")
+        #expect(job.variables.first?.value == "")
+        #expect(job.variables.last?.value == "group/app")
+        #expect(job.unreadableFields.isEmpty)
+    }
+
+    /// 沒有 `value` 鍵與值為 null 同義；兩者都不得讓變數本身消失。
+    @Test
+    func `variable without a value key decodes as empty`() throws {
+        let job: JobResponse = try decodeJob(#"{"id":1,"token":"t","variables":[{"key":"EMPTY"}]}"#)
+        #expect(job.variables.first?.key == "EMPTY")
+        #expect(job.variables.first?.value == "")
+        #expect(job.unreadableFields.isEmpty)
+    }
+
     /// 能力欄位形狀變了不得讓整包解不出來——那會讓已指派的 job 靜靜消失。
     @Test
     func `unexpected capability shape is recorded instead of throwing`() throws {
