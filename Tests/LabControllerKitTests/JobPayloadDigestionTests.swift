@@ -145,6 +145,49 @@ private final class JobPayloadDecodingTests {
         #expect(job.unreadableFields.isEmpty)
     }
 
+    /// 一個變數讀不懂不得拖垮其餘的：壞的那個記名字，好的那些照常帶出來。
+    @Test
+    func `unreadable variable is named without dropping the rest`() throws {
+        let job: JobResponse = try decodeJob(#"""
+        {"id":1,"token":"t","variables":[
+          {"key":"CI_PROJECT_PATH","value":"group/app"},
+          {"key":"CI_ODDITY","value":{"nested":"shape"}},
+          {"key":"CI_COMMIT_SHA","value":"abc"}
+        ]}
+        """#)
+        #expect(job.variables.map(\.key) == ["CI_PROJECT_PATH", "CI_COMMIT_SHA"])
+        #expect(job.unreadableFields == ["variables[CI_ODDITY]"])
+    }
+
+    /// 連名稱都讀不出來時記序號，序號指的是它在站台送來的陣列裡的位置。
+    @Test
+    func `unreadable variable without a name is recorded by position`() throws {
+        let job: JobResponse = try decodeJob(#"""
+        {"id":1,"token":"t","variables":[{"key":"A","value":"1"},42,{"key":"B","value":"2"}]}
+        """#)
+        #expect(job.variables.map(\.key) == ["A", "B"])
+        #expect(job.unreadableFields == ["variables[#1]"])
+    }
+
+    /// 整個 `variables` 不是陣列時仍記整個欄位名，與其他欄位同形。
+    @Test
+    func `variables of the wrong shape are recorded as one field`() throws {
+        let job: JobResponse = try decodeJob(#"{"id":1,"token":"t","variables":"CI_PROJECT_PATH=group/app"}"#)
+        #expect(job.variables.isEmpty)
+        #expect(job.unreadableFields == ["variables"])
+    }
+
+    /// 讀不懂的變數要擋下這件 job：其餘變數還在，不代表這件事可以照跑。
+    @Test
+    func `unreadable variable blocks admission`() {
+        let job: JobResponse = .init(id: 1, token: "t", unreadableFields: ["variables[CI_ODDITY]"])
+        guard case let .rejected(rejection) = JobAdmission.review(job) else {
+            Issue.record("讀不懂的變數必須擋下收件")
+            return
+        }
+        #expect(rejection.features == [.unreadablePayloadField(name: "variables[CI_ODDITY]")])
+    }
+
     /// 能力欄位形狀變了不得讓整包解不出來——那會讓已指派的 job 靜靜消失。
     @Test
     func `unexpected capability shape is recorded instead of throwing`() throws {
