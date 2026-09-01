@@ -21,9 +21,10 @@ public struct JobPollingLoop: Sendable {
 
     /// 這圈迴圈要往哪個站台領件、用哪把 token、開哪一份基底。
     ///
-    /// ⚠️ 本型別持有 runner 認證 token，故**不合成 `Equatable`／`CustomStringConvertible`**：
-    /// 兩者都會讓這把 token 有機會被印進錯誤訊息或測試輸出。
-    public struct Configuration: Sendable {
+    /// ⚠️ 本型別持有 runner 認證 token，故**不合成 `Equatable`**，並且自己實作
+    /// ``description`` 把 token 印成 `<redacted>`：不實作只會讓插值與 `dump` 走反射，
+    /// 把每個儲存屬性照印一遍，token 也在其中——沉默不等於印不出來。
+    public struct Configuration: Sendable, CustomStringConvertible {
 
         /// GitLab 站台基底網址。
         public let host: String
@@ -63,6 +64,12 @@ public struct JobPollingLoop: Sendable {
             self.image = image
             self.runner = runner
             self.retryInterval = retryInterval
+        }
+
+        /// 印出時一律遮掉 token。
+        public var description: String {
+            "JobPollingLoop.Configuration(host: \(host), image: \(image), "
+                + "retryInterval: \(retryInterval), runnerToken: <redacted>)"
         }
     }
 
@@ -107,8 +114,9 @@ public struct JobPollingLoop: Sendable {
     ///
     /// - Parameter cursor: 上一輪帶回來的游標；第一輪給 nil。
     /// - Returns: 這一輪的處置與下一輪要帶的游標。
-    /// - Throws: 領件或回寫的連線層錯誤。**跑 job 本身不會拋**——跑不成也是一份結果，
-    ///   照樣回寫給站台（見 ``JobRunner/run(_:on:)``）。
+    /// - Throws: 領件的連線層錯誤原樣拋出；回寫送不出去時拋 ``JobDeliveryFailure``（已重送過
+    ///   一次），兩者分開才知道那件 job 有沒有被經手。**跑 job 本身不會拋**——跑不成也是一份
+    ///   結果，照樣回寫給站台（見 ``JobRunner/run(_:on:)``）。
     public func poll(cursor: String?) async throws -> JobCycle {
         let result: JobRequestResult = try await client.requestJob(
             host: configuration.host,
@@ -122,12 +130,12 @@ public struct JobPollingLoop: Sendable {
         let target: JobReportTarget = .init(host: configuration.host, identifier: job.id, token: job.token)
         switch JobAdmission.review(job) {
         case let .rejected(rejection):
-            let delivery: JobReportDelivery = try await reporter.report(Self.report(of: rejection), to: target)
+            let delivery: JobReportDelivery = try await deliver(Self.report(of: rejection), to: target, of: job.id)
             return .init(disposition: .refused(jobIdentifier: job.id, delivery: delivery), cursor: result.lastUpdate)
         case let .accepted(plan):
             let runner: JobRunner = .init(backend: backend, configuration: configuration.runner)
             let report: JobRunReport = await runner.run(plan, on: configuration.image)
-            let delivery: JobReportDelivery = try await reporter.report(report, to: target)
+            let delivery: JobReportDelivery = try await deliver(report, to: target, of: job.id)
             return .init(
                 disposition: .handled(jobIdentifier: job.id, outcome: report.outcome, delivery: delivery),
                 cursor: result.lastUpdate
@@ -135,10 +143,43 @@ public struct JobPollingLoop: Sendable {
         }
     }
 
+    /// 把一份結果送回站台；第一次送不出去就退開一段再送一次。
+    ///
+    /// 這件 job 已經在這台機器上經手完了，結果沒送到站台端就等於整趟白跑：站台看不到終態，
+    /// 那件 job 會一路掛到它自己判死為止。重送不會把 log 寫重——trace 是帶偏移送的，站台
+    /// 收過的部分會在回應裡把偏移指回來（見 ``JobResultReporter``）。
+    ///
+    /// 兩次都送不出去才拋，且拋的是帶著 job 識別碼的 ``JobDeliveryFailure``，不是原始的連線
+    /// 層錯誤：呼叫端要靠這個型別分辨「沒領到」與「領到跑完但送不回去」。
+    ///
+    /// - Parameters:
+    ///   - report: 要送出的結果。
+    ///   - target: 回寫座標。
+    ///   - identifier: 這份結果屬於哪一件 job。
+    /// - Returns: 站台收下的方式。
+    /// - Throws: 兩次都失敗時拋 ``JobDeliveryFailure``。
+    private func deliver(
+        _ report: JobRunReport,
+        to target: JobReportTarget,
+        of identifier: Int
+    ) async throws -> JobReportDelivery {
+        do {
+            return try await reporter.report(report, to: target)
+        } catch {
+            await wait(configuration.retryInterval)
+        }
+        do {
+            return try await reporter.report(report, to: target)
+        } catch {
+            throw JobDeliveryFailure(jobIdentifier: identifier, cause: error)
+        }
+    }
+
     /// 一直領到被喊停。
     ///
     /// 領件那一步失敗不結束迴圈：站台不在、網路斷一下都屬於「等一下再試」，就地退出會讓這台
-    /// runner 從此不再出現在站台的候選裡，而沒有任何人會發現。
+    /// runner 從此不再出現在站台的候選裡，而沒有任何人會發現。**回寫失敗則不同**：那件 job 已經
+    /// 經手過，紀錄要指名是哪一件，而 `--once` 照樣在那裡收工。
     ///
     /// **喊停最慢會等到當下這一輪走完**：領件是 long-poll，站台端最長 hold 到五十秒左右；跑到
     /// 一半的 job 更不能從中間丟下——那會留下一台沒人收的 guest，以及站台端一件永遠停在執行中
@@ -160,6 +201,14 @@ public struct JobPollingLoop: Sendable {
             let cycle: JobCycle
             do {
                 cycle = try await poll(cursor: currentCursor)
+            } catch let failure as JobDeliveryFailure {
+                // 回寫失敗與領件失敗的下一步相反：這件 job 已經被這台機器經手過，接著去領第二件
+                // 等於在同一台機器上疊工作，`--once` 也會失去「經手一件即收工」的意思。站台端那件
+                // 停在執行中已無從補救（重送在 ``deliver(_:to:of:)`` 裡試過了），至少要留下座標。
+                log("job \(failure.jobIdentifier) report failed: \(failure.cause)")
+                if stopAfterFirstJob { return }
+                await wait(configuration.retryInterval)
+                continue
             } catch {
                 // 錯誤本身可以照印：協議層的錯誤型別已經把站台網址收斂成 scheme／host／port，
                 // 不會把嵌在網址裡的憑證帶出來。
