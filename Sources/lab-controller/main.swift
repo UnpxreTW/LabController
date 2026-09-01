@@ -87,7 +87,10 @@ if let run: RunCommand = parsedCommand as? RunCommand {
     let sources: [any DispatchSourceSignal] = installStopHandlers {
         stopRequested.store(true, ordering: .relaxed)
     }
-    print("lab-controller: polling \(run.host) guest=\(run.os.rawValue) image=\(run.golden)")
+    // 站台位址只印 scheme／host／port：`--host` 收得下 `https://oauth2:<token>@…` 這種形狀，
+    // 原樣印出等於把憑證寫進行程的第一行 stdout。
+    let safeHost: String = GitLabAPIError.safeLocation(of: run.host)
+    print("lab-controller: polling \(safeHost) guest=\(run.os.rawValue) image=\(run.golden)")
     await loop.run(
         stopAfterFirstJob: run.once,
         isStopped: { stopRequested.load(ordering: .relaxed) },
