@@ -17,7 +17,7 @@ public struct LabControllerCommand: ParsableCommand {
 
     public static let configuration: CommandConfiguration = .init(
         commandName: "lab-controller",
-        subcommands: [RegisterCommand.self]
+        subcommands: [RegisterCommand.self, RunCommand.self]
     )
 
     /// GitLab API 版本；未給時回落 `Config.default.version`。

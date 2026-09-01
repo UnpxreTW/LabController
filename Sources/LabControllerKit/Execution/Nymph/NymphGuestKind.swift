@@ -6,6 +6,8 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
+import ArgumentParser
+
 /// 要 nymph 開哪一種 guest。
 ///
 /// **這一欄在線上是必填的、也沒有預設**：對面同一組別名可能同時存在於兩種 guest 的別名空間
@@ -29,4 +31,10 @@ extension NymphGuestKind: Encodable {
 
     // 線上就是 `"mac"`／`"linux"` 兩個字面值，合成的實作即為所需；conformance 分出來的理由
     // 是型別本體只留語意，見風格指南。
+}
+
+extension NymphGuestKind: ExpressibleByArgument {
+
+    // 命令列要打的字面值與線上的是同兩個，合成的實作即為所需；`CaseIterable` 讓 `--help`
+    // 自己列出可用值、打錯時由 ArgumentParser 直接擋在解析階段。
 }
