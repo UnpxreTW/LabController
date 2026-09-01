@@ -240,6 +240,89 @@ private final class JobPollingLoopTests {
         #expect(polls.count == 2)
     }
 
+    /// 回寫第一次送不出去就重送一次；送到了照樣是「經手完一件」。
+    @Test
+    func `resends the report once when the first attempt fails`() async throws {
+        let transport: ScriptedPollTransport = .init([
+            .respond(assignedJob), .fail, .respond(.init(statusCode: 200)),
+        ])
+        let waits: Mutex<[TimeInterval]> = .init([])
+        let loop: JobPollingLoop = .init(
+            client: .init(transport: transport),
+            backend: InMemoryExecutionBackend(),
+            reporter: .init(client: .init(transport: transport), wait: { _ in }),
+            configuration: configuration,
+            wait: { seconds in waits.withLock { $0.append(seconds) } }
+        )
+        let cycle: JobCycle = try await loop.poll(cursor: nil)
+        #expect(waits.withLock { $0 } == [30])
+        #expect(cycle.disposition == .handled(jobIdentifier: 7, outcome: .completed, delivery: .init(
+            acceptance: .written, traceIsComplete: true, updateAttempts: 1
+        )))
+    }
+
+    /// 回寫兩次都送不出去：拋的是帶著 job 識別碼的錯，不是領件那一種。
+    @Test
+    func `reports which job could not be delivered`() async throws {
+        let transport: ScriptedPollTransport = .init([.respond(assignedJob), .fail])
+        let loop: JobPollingLoop = .init(
+            client: .init(transport: transport),
+            backend: InMemoryExecutionBackend(),
+            reporter: .init(client: .init(transport: transport), wait: { _ in }),
+            configuration: configuration,
+            wait: { _ in }
+        )
+        await #expect(throws: JobDeliveryFailure.self) {
+            _ = try await loop.poll(cursor: nil)
+        }
+    }
+
+    /// `--once` 遇上回寫失敗照樣收工：那件 job 已經跑過，再領第二件等於同機疊工作。
+    @Test
+    func `stops after a handled job even when the report cannot be delivered`() async throws {
+        let transport: ScriptedPollTransport = .init([.respond(assignedJob), .fail])
+        let loop: JobPollingLoop = .init(
+            client: .init(transport: transport),
+            backend: InMemoryExecutionBackend(),
+            reporter: .init(client: .init(transport: transport), wait: { _ in }),
+            configuration: configuration,
+            wait: { _ in }
+        )
+        let lines: Mutex<[String]> = .init([])
+        await loop.run(stopAfterFirstJob: true, isStopped: { false }, log: { line in
+            lines.withLock { $0.append(line) }
+        })
+        let polls: [HTTPRequest] = transport.requests.withLock { $0.filter { $0.url.lastPathComponent == "request" } }
+        #expect(polls.count == 1)
+        #expect(lines.withLock { $0 } == ["job 7 report failed: TransportOutage()"])
+    }
+
+    /// 拒收那一路的回寫失敗走同一條路：一樣指名 job、一樣讓 `--once` 收工。
+    @Test
+    func `treats an undeliverable refusal as a handled job`() async throws {
+        let transport: ScriptedPollTransport = .init([.respond(containerJob), .fail])
+        let loop: JobPollingLoop = .init(
+            client: .init(transport: transport),
+            backend: InMemoryExecutionBackend(),
+            reporter: .init(client: .init(transport: transport), wait: { _ in }),
+            configuration: configuration,
+            wait: { _ in }
+        )
+        let lines: Mutex<[String]> = .init([])
+        await loop.run(stopAfterFirstJob: true, isStopped: { false }, log: { line in
+            lines.withLock { $0.append(line) }
+        })
+        #expect(lines.withLock { $0.first }?.hasPrefix("job 9 report failed") == true)
+    }
+
+    /// 設定印出來時 token 不在裡面——沒實作這支的話，插值會走反射把它照印。
+    @Test
+    func `keeps the runner token out of its own description`() {
+        let rendered: String = "\(configuration)"
+        #expect(!rendered.contains("synthetic-runner-token"))
+        #expect(rendered.contains("<redacted>"))
+    }
+
     /// 已經被喊停就一次都不敲——停止旗標在每一輪開始前問。
     @Test
     func `does not poll once stopped`() async throws {
