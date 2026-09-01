@@ -315,14 +315,6 @@ private final class JobPollingLoopTests {
         #expect(lines.withLock { $0.first }?.hasPrefix("job 9 report failed") == true)
     }
 
-    /// 設定印出來時 token 不在裡面——沒實作這支的話，插值會走反射把它照印。
-    @Test
-    func `keeps the runner token out of its own description`() {
-        let rendered: String = "\(configuration)"
-        #expect(!rendered.contains("synthetic-runner-token"))
-        #expect(rendered.contains("<redacted>"))
-    }
-
     /// 已經被喊停就一次都不敲——停止旗標在每一輪開始前問。
     @Test
     func `does not poll once stopped`() async throws {

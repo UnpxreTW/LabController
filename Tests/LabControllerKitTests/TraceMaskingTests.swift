@@ -348,4 +348,30 @@ private final class SecretRedactionTests {
             #expect(!rendered.contains("synthetic-job-token"))
         }
     }
+
+    /// 迴圈設定的四條輸出路徑都不得帶出 runner token，網址裡的憑證同樣不得留下。
+    ///
+    /// 第四條路（包進外層型別後 `dump`）單獨列出來，是因為排查時真正會被印的是持有設定的
+    /// 那一層——只驗裸型別的話，`CustomReflectable` 漏實作也照樣過。
+    @Test
+    func `polling configuration never prints the runner token`() {
+        struct Holder {
+            let configuration: JobPollingLoop.Configuration
+        }
+        let configuration: JobPollingLoop.Configuration = .init(
+            host: "https://oauth2:synthetic-job-token@gitlab.example.invalid",
+            runnerToken: "synthetic-runner-token",
+            image: .alias("golden-xcode")
+        )
+        var dumped: String = ""
+        dump(configuration, to: &dumped)
+        var nested: String = ""
+        dump(Holder(configuration: configuration), to: &nested)
+        for rendered in ["\(configuration)", String(reflecting: configuration), dumped, nested] {
+            #expect(!rendered.contains("synthetic-runner-token"))
+            #expect(!rendered.contains("synthetic-job-token"))
+            #expect(rendered.contains("<redacted>"))
+            #expect(rendered.contains("gitlab.example.invalid"))
+        }
+    }
 }

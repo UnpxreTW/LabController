@@ -21,10 +21,13 @@ public struct JobPollingLoop: Sendable {
 
     /// 這圈迴圈要往哪個站台領件、用哪把 token、開哪一份基底。
     ///
-    /// ⚠️ 本型別持有 runner 認證 token，故**不合成 `Equatable`**，並且自己實作
-    /// ``description`` 把 token 印成 `<redacted>`：不實作只會讓插值與 `dump` 走反射，
-    /// 把每個儲存屬性照印一遍，token 也在其中——沉默不等於印不出來。
-    public struct Configuration: Sendable, CustomStringConvertible {
+    /// ⚠️ 本型別持有 runner 認證 token，故**不合成 `Equatable`**，並且把三條輸出路徑
+    /// 一起收口：``description``（插值與 `String(describing:)`）、``debugDescription``
+    /// （`String(reflecting:)`）與 ``customMirror``（`dump`）。三者缺一不可——只實作
+    /// ``description`` 的話 `dump` 仍走 `Mirror`、把每個儲存屬性照印一遍，token 也在
+    /// 其中；沉默更不等於印不出來。站台位址同樣經 ``GitLabAPIError/safeLocation(of:)``
+    /// 收斂，因為憑證常被嵌在網址的 userinfo 段。
+    public struct Configuration: Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
 
         /// GitLab 站台基底網址。
         public let host: String
@@ -66,10 +69,35 @@ public struct JobPollingLoop: Sendable {
             self.retryInterval = retryInterval
         }
 
-        /// 印出時一律遮掉 token。
+        /// 印出時一律遮掉 token，站台位址只留 scheme／host／port。
         public var description: String {
-            "JobPollingLoop.Configuration(host: \(host), image: \(image), "
+            "JobPollingLoop.Configuration(host: \(safeHost), image: \(image), "
                 + "retryInterval: \(retryInterval), runnerToken: <redacted>)"
+        }
+
+        /// 與 ``description`` 相同；debug 情境更需要這層保護，不是更不需要。
+        public var debugDescription: String {
+            description
+        }
+
+        /// `dump` 走 `Mirror`、繞過上面兩者，故一併收口。
+        public var customMirror: Mirror {
+            .init(
+                self,
+                children: [
+                    "host": safeHost,
+                    "image": image,
+                    "runner": runner,
+                    "retryInterval": retryInterval,
+                    "runnerToken": "<redacted>",
+                ],
+                displayStyle: .struct
+            )
+        }
+
+        /// 收斂成可安全記錄的站台位址：憑證常被嵌在網址的 userinfo 段。
+        private var safeHost: String {
+            GitLabAPIError.safeLocation(of: host)
         }
     }
 
