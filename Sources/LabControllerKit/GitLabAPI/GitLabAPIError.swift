@@ -80,9 +80,7 @@ public extension GitLabAPIError {
     /// - Parameter error: 要寫進紀錄的錯誤。
     /// - Returns: 不帶憑證的一句描述。
     static func safeDescription(of error: any Error) -> String {
-        guard let urlError: URLError = error as? URLError else {
-            return .init(describing: error)
-        }
+        guard let urlError: URLError = error as? URLError else { return .init(describing: error) }
         let location: String = urlError.failingURL.map { safeLocation(of: $0.absoluteString) } ?? unparsableLocation
         return "URLError(code: \(urlError.errorCode), location: \(location))"
     }

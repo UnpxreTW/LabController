@@ -21,9 +21,7 @@ private let credentialBearingURL: String = "https://oauth2:glpat-synthetic@gitla
 ///
 /// 假傳輸原本只拋合成型別 ``TransportOutage``，永遠碰不到這條真路徑，遮蔽漏了也測不出來。
 private let credentialBearingTransportError: URLError = {
-    guard let url: URL = .init(string: credentialBearingURL) else {
-        preconditionFailure("合成網址字面值應解得開")
-    }
+    guard let url: URL = .init(string: credentialBearingURL) else { preconditionFailure("合成網址字面值應解得開") }
     return .init(.cannotConnectToHost, userInfo: [NSURLErrorFailingURLErrorKey: url])
 }()
 
