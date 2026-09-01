@@ -233,14 +233,16 @@ public struct JobPollingLoop: Sendable {
                 // 回寫失敗與領件失敗的下一步相反：這件 job 已經被這台機器經手過，接著去領第二件
                 // 等於在同一台機器上疊工作，`--once` 也會失去「經手一件即收工」的意思。站台端那件
                 // 停在執行中已無從補救（重送在 ``deliver(_:to:of:)`` 裡試過了），至少要留下座標。
-                log("job \(failure.jobIdentifier) report failed: \(failure.cause)")
+                log("job \(failure.jobIdentifier) report failed: \(GitLabAPIError.safeDescription(of: failure.cause))")
                 if stopAfterFirstJob { return }
                 await wait(configuration.retryInterval)
                 continue
             } catch {
-                // 錯誤本身可以照印：協議層的錯誤型別已經把站台網址收斂成 scheme／host／port，
-                // 不會把嵌在網址裡的憑證帶出來。
-                log("poll failed: \(error)")
+                // 錯誤一律經 ``GitLabAPIError/safeDescription(of:)`` 再印：協議層自己拋的錯誤確實
+                // 已把站台網址收斂成 scheme／host／port，但傳輸層不是——`URLSession` 連不上時拋的
+                // `URLError` 原樣往上傳，`userInfo` 裡帶著送出去的整條網址，`--host` 的 userinfo 段
+                // 收得下憑證。這條路在站台不在時每個退避週期就走一次。
+                log("poll failed: \(GitLabAPIError.safeDescription(of: error))")
                 await wait(configuration.retryInterval)
                 continue
             }

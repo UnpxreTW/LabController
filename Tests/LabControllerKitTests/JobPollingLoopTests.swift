@@ -14,6 +14,19 @@ import Testing
 /// 站台此刻連不上；只用來排「這一次領不到」的那一步。
 private struct TransportOutage: Error {}
 
+/// 送出去的那條網址把憑證嵌在 userinfo 段；全為合成值。
+private let credentialBearingURL: String = "https://oauth2:glpat-synthetic@gitlab.example.invalid/api/v4/jobs/request"
+
+/// `URLSession` 連不上時實際會拋的形狀：`userInfo` 原樣帶著送出去的整條網址。
+///
+/// 假傳輸原本只拋合成型別 ``TransportOutage``，永遠碰不到這條真路徑，遮蔽漏了也測不出來。
+private let credentialBearingTransportError: URLError = {
+    guard let url: URL = .init(string: credentialBearingURL) else {
+        preconditionFailure("合成網址字面值應解得開")
+    }
+    return .init(.cannotConnectToHost, userInfo: [NSURLErrorFailingURLErrorKey: url])
+}()
+
 /// 依序播放的假傳輸，序列裡可以排連不上的那一次。
 ///
 /// 全部為合成資料（假 id／token／站台位址）。序列耗盡後重複最後一步——迴圈要跑幾輪由測試的
@@ -28,6 +41,9 @@ private final class ScriptedPollTransport: HTTPTransport, Sendable {
 
         /// 這一次連不上。
         case fail
+
+        /// 這一次連不上，且拋的是把網址帶在身上的真 `URLError`。
+        case failWithCredentialBearingURL
     }
 
     /// 收到的請求，依序累積。
@@ -47,7 +63,7 @@ private final class ScriptedPollTransport: HTTPTransport, Sendable {
     ///
     /// - Parameter request: 送出的請求。
     /// - Returns: 這一步排定的回應。
-    /// - Throws: 這一步排的是連不上時拋 ``TransportOutage``。
+    /// - Throws: 這一步排的是連不上時拋 ``TransportOutage``，排的是帶網址那形時拋 `URLError`。
     func send(_ request: HTTPRequest) async throws -> HTTPResponse {
         requests.withLock { $0.append(request) }
         let step: Step = steps.withLock { queue in
@@ -56,6 +72,7 @@ private final class ScriptedPollTransport: HTTPTransport, Sendable {
         switch step {
         case let .respond(response): return response
         case .fail: throw TransportOutage()
+        case .failWithCredentialBearingURL: throw credentialBearingTransportError
         }
     }
 }
@@ -238,6 +255,48 @@ private final class JobPollingLoopTests {
         #expect(lines.withLock { $0.first }?.hasPrefix("poll failed") == true)
         let polls: [HTTPRequest] = transport.requests.withLock { $0.filter { $0.url.lastPathComponent == "request" } }
         #expect(polls.count == 2)
+    }
+
+    /// 領件失敗那一行不帶憑證：傳輸層的錯誤把整條網址帶在身上，而站台位址收得下憑證。
+    @Test
+    func `keeps credentials out of the line logged for a failed request`() async throws {
+        let transport: ScriptedPollTransport = .init([.failWithCredentialBearingURL, .respond(assignedJob)])
+        let loop: JobPollingLoop = .init(
+            client: .init(transport: transport),
+            backend: InMemoryExecutionBackend(),
+            reporter: .init(client: .init(transport: transport), wait: { _ in }),
+            configuration: configuration,
+            wait: { _ in }
+        )
+        let lines: Mutex<[String]> = .init([])
+        await loop.run(stopAfterFirstJob: true, isStopped: { false }, log: { line in
+            lines.withLock { $0.append(line) }
+        })
+        let first: String = try #require(lines.withLock { $0.first })
+        #expect(first.hasPrefix("poll failed"))
+        #expect(!first.contains("glpat-synthetic"))
+        #expect(first.contains("https://gitlab.example.invalid"))
+    }
+
+    /// 回寫失敗那一行同樣不帶憑證：兩條錯誤路徑走同一套收斂。
+    @Test
+    func `keeps credentials out of the line logged for an undeliverable report`() async throws {
+        let transport: ScriptedPollTransport = .init([.respond(assignedJob), .failWithCredentialBearingURL])
+        let loop: JobPollingLoop = .init(
+            client: .init(transport: transport),
+            backend: InMemoryExecutionBackend(),
+            reporter: .init(client: .init(transport: transport), wait: { _ in }),
+            configuration: configuration,
+            wait: { _ in }
+        )
+        let lines: Mutex<[String]> = .init([])
+        await loop.run(stopAfterFirstJob: true, isStopped: { false }, log: { line in
+            lines.withLock { $0.append(line) }
+        })
+        let first: String = try #require(lines.withLock { $0.first })
+        #expect(first.hasPrefix("job 7 report failed"))
+        #expect(!first.contains("glpat-synthetic"))
+        #expect(first.contains("https://gitlab.example.invalid"))
     }
 
     /// 回寫第一次送不出去就重送一次；送到了照樣是「經手完一件」。

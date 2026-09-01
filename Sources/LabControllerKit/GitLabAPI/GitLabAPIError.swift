@@ -66,4 +66,24 @@ public extension GitLabAPIError {
         let port: String = components.port.map { ":\($0)" } ?? ""
         return "\(scheme)\(host)\(port)"
     }
+
+    /// 把任一錯誤收斂成可安全記錄的一句話：傳輸層的錯誤只留錯誤碼與經 ``safeLocation(of:)`` 收斂的位置。
+    ///
+    /// `URLSession` 連不上時拋的 `URLError` 會把**送出去的整條網址**放進 `userInfo`
+    /// （`NSErrorFailingURLKey`；本機實跑確認），而 `--host` 收得下
+    /// `https://oauth2:<token>@gitlab.example.com` 這種形狀 ⇒ 直接內插該錯誤等於把憑證寫進 log。
+    /// 領件又是迴圈，站台不在的期間每個退避週期就再寫一次。
+    ///
+    /// 不是 `URLError` 的照原樣描述：本模組自己拋的 ``GitLabAPIError`` 在建立處就已收斂
+    /// （見 ``invalidURL(_:)`` 與 ``undecodableBody(codingPath:)``），不需要第二層遮蔽。
+    ///
+    /// - Parameter error: 要寫進紀錄的錯誤。
+    /// - Returns: 不帶憑證的一句描述。
+    static func safeDescription(of error: any Error) -> String {
+        guard let urlError: URLError = error as? URLError else {
+            return .init(describing: error)
+        }
+        let location: String = urlError.failingURL.map { safeLocation(of: $0.absoluteString) } ?? unparsableLocation
+        return "URLError(code: \(urlError.errorCode), location: \(location))"
+    }
 }
