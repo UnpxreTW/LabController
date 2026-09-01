@@ -138,7 +138,7 @@ public struct JobResponse: Decodable, Sendable, Equatable,
         self.id = try container.decode(Int.self, forKey: .id)
         self.token = try container.decode(String.self, forKey: .token)
         var unreadable: [String] = []
-        self.variables = Self.optional([JobVariable].self, in: container, forKey: .variables, into: &unreadable) ?? []
+        self.variables = Self.variables(in: container, into: &unreadable)
         self.steps = Self.optional([JobStep].self, in: container, forKey: .steps, into: &unreadable) ?? []
         self.gitInfo = Self.optional(GitInfo.self, in: container, forKey: .gitInfo, into: &unreadable)
         self.runnerInfo = Self.optional(JobRunnerInfo.self, in: container, forKey: .runnerInfo, into: &unreadable)
@@ -183,6 +183,55 @@ public struct JobResponse: Decodable, Sendable, Equatable,
             unreadable.append(key.stringValue)
             return nil
         }
+    }
+
+    /// 逐個解變數；讀不懂的那一個記名字，其餘照常帶出來。
+    ///
+    /// 與其他欄位的差別在於**壞掉的粒度**：`variables` 是一整批互不相干的東西，其中一個
+    /// 形狀不對就把整批換成空陣列，等於把 job 的觸發脈絡全部丟掉，trace 上也只看得到
+    /// 「variables 讀不懂」——是哪一個變數、其餘的還在不在，都要人去翻站台端才知道。
+    ///
+    /// 讀不懂的元素仍記進 `unreadable`（記法：讀得出名字記 `variables[名稱]`，連名字都讀不出
+    /// 就記序號 `variables[#0]`），**不因為其餘元素完好就放行**——收不收由 `JobAdmission` 判，
+    /// 這裡只負責把「壞在哪一個」講清楚。變數的值不進這條路徑：它可能是秘密，而名稱不是。
+    ///
+    /// 陣列本身形狀不對（例如送成字串）仍記整個欄位名，與其他欄位同形；缺席或 null 視為沒有變數。
+    private static func variables(
+        in container: KeyedDecodingContainer<CodingKeys>,
+        into unreadable: inout [String]
+    ) -> [JobVariable] {
+        guard container.contains(.variables) else { return [] }
+        guard let isNull: Bool = try? container.decodeNil(forKey: .variables) else {
+            unreadable.append(CodingKeys.variables.stringValue)
+            return []
+        }
+        guard !isNull else { return [] }
+        guard var elements: UnkeyedDecodingContainer = try? container.nestedUnkeyedContainer(
+            forKey: .variables
+        ) else {
+            unreadable.append(CodingKeys.variables.stringValue)
+            return []
+        }
+        var decoded: [JobVariable] = []
+        while !elements.isAtEnd {
+            let position: Int = elements.currentIndex
+            // 逐元素解**必須**走一個不會拋的包裝型別：陣列容器的游標只在解成功時前進，
+            // 元素直接拋錯時游標停在原地，接住錯誤再繼續就成了永遠走不完的迴圈。
+            guard let element: PartiallyReadableVariable = try? elements.decode(
+                PartiallyReadableVariable.self
+            ) else {
+                // 包裝型別自己不拋，走到這裡代表容器層出了別的事；停下來並記整個欄位名，
+                // 不假裝已經讀完——剩下幾個沒讀到，說「沒有」就是報錯的方向。
+                unreadable.append(CodingKeys.variables.stringValue)
+                return decoded
+            }
+            if let variable: JobVariable = element.variable {
+                decoded.append(variable)
+            } else {
+                unreadable.append("variables[\(element.name ?? "#\(position)")]")
+            }
+        }
+        return decoded
     }
 
     /// 數出某個陣列欄位有幾筆，不解其內容。
@@ -247,6 +296,41 @@ public struct JobResponse: Decodable, Sendable, Equatable,
         } catch {
             unreadable.append(CodingKeys.image.stringValue)
             return nil
+        }
+    }
+
+    /// 一個變數解得出來與否的兩態；**這個型別自己永遠不拋**。
+    ///
+    /// 存在的理由是陣列容器的游標：元素解碼拋錯時游標不前進，於是「接住錯誤、繼續下一個」
+    /// 會原地打轉。把不拋這件事做成型別的性質，逐元素的迴圈就不必再去處理游標。
+    private struct PartiallyReadableVariable: Decodable {
+
+        /// 解得出來的變數；讀不懂時為 nil。
+        let variable: JobVariable?
+
+        /// 讀不懂時仍取得到的變數名稱；連名稱都讀不出來則為 nil。
+        ///
+        /// 只留名稱、不留任何值：這個字串會被記進讀不懂的欄位清單、進而寫上 trace。
+        let name: String?
+
+        /// 先照正常形狀解；解不出來就退而只取名稱。
+        init(from decoder: any Decoder) throws {
+            self.variable = try? .init(from: decoder)
+            guard self.variable == nil else {
+                self.name = nil
+                return
+            }
+            let container: KeyedDecodingContainer<NameCodingKeys>? = try? decoder.container(
+                keyedBy: NameCodingKeys.self
+            )
+            self.name = try? container?.decodeIfPresent(String.self, forKey: .key)
+        }
+
+        /// 退而求其次時唯一會讀的欄位。
+        private enum NameCodingKeys: String, CodingKey {
+
+            /// 變數名稱。
+            case key
         }
     }
 

@@ -15,6 +15,9 @@ public struct JobVariable: Decodable, Sendable, Equatable {
     public let key: String
 
     /// 變數值。
+    ///
+    /// 站台送 null 時為空字串：GitLab CE 對未設分類標籤的專案，`CI_PROJECT_CLASSIFICATION_LABEL`
+    /// 的值恆為 null（該設定屬付費版能力、社群版設不了），而那是每一個 job 都會收到的變數。
     public let value: String
 
     /// 是否為遮蔽變數；遮蔽者不得寫進 log。
@@ -31,11 +34,14 @@ public struct JobVariable: Decodable, Sendable, Equatable {
         self.file = file
     }
 
-    /// 解碼；`masked`／`file` 缺席時視為 false。
+    /// 解碼；`value` 缺席或為 null 視為空字串，`masked`／`file` 缺席時視為 false。
+    ///
+    /// `value` 刻意不拋：站台一定會送出值為 null 的變數（見該屬性說明），把它當解碼失敗會
+    /// 讓每一個 job 的變數都讀不出來。官方 runner 在同一個位置得到的也是字串的零值。
     public init(from decoder: any Decoder) throws {
         let container: KeyedDecodingContainer<CodingKeys> = try decoder.container(keyedBy: CodingKeys.self)
         self.key = try container.decode(String.self, forKey: .key)
-        self.value = try container.decode(String.self, forKey: .value)
+        self.value = try container.decodeIfPresent(String.self, forKey: .value) ?? ""
         self.masked = try container.decodeIfPresent(Bool.self, forKey: .masked) ?? false
         self.file = try container.decodeIfPresent(Bool.self, forKey: .file) ?? false
     }

@@ -120,6 +120,74 @@ private final class JobPayloadDecodingTests {
         #expect(job.unreadableFields == ["dependencies[].artifacts_file.filename"])
     }
 
+    /// 值為 null 的變數解成空字串：站台每次都會送至少一個這種變數，拋錯等於一件也接不了。
+    @Test
+    func `variable with a null value decodes as empty`() throws {
+        let job: JobResponse = try decodeJob(#"""
+        {"id":1,"token":"t","variables":[
+          {"key":"CI_PROJECT_CLASSIFICATION_LABEL","value":null,"masked":false,"public":true},
+          {"key":"CI_PROJECT_PATH","value":"group/app","masked":false}
+        ]}
+        """#)
+        #expect(job.variables.count == 2)
+        #expect(job.variables.first?.key == "CI_PROJECT_CLASSIFICATION_LABEL")
+        #expect(job.variables.first?.value == "")
+        #expect(job.variables.last?.value == "group/app")
+        #expect(job.unreadableFields.isEmpty)
+    }
+
+    /// 沒有 `value` 鍵與值為 null 同義；兩者都不得讓變數本身消失。
+    @Test
+    func `variable without a value key decodes as empty`() throws {
+        let job: JobResponse = try decodeJob(#"{"id":1,"token":"t","variables":[{"key":"EMPTY"}]}"#)
+        #expect(job.variables.first?.key == "EMPTY")
+        #expect(job.variables.first?.value == "")
+        #expect(job.unreadableFields.isEmpty)
+    }
+
+    /// 一個變數讀不懂不得拖垮其餘的：壞的那個記名字，好的那些照常帶出來。
+    @Test
+    func `unreadable variable is named without dropping the rest`() throws {
+        let job: JobResponse = try decodeJob(#"""
+        {"id":1,"token":"t","variables":[
+          {"key":"CI_PROJECT_PATH","value":"group/app"},
+          {"key":"CI_ODDITY","value":{"nested":"shape"}},
+          {"key":"CI_COMMIT_SHA","value":"abc"}
+        ]}
+        """#)
+        #expect(job.variables.map(\.key) == ["CI_PROJECT_PATH", "CI_COMMIT_SHA"])
+        #expect(job.unreadableFields == ["variables[CI_ODDITY]"])
+    }
+
+    /// 連名稱都讀不出來時記序號，序號指的是它在站台送來的陣列裡的位置。
+    @Test
+    func `unreadable variable without a name is recorded by position`() throws {
+        let job: JobResponse = try decodeJob(#"""
+        {"id":1,"token":"t","variables":[{"key":"A","value":"1"},42,{"key":"B","value":"2"}]}
+        """#)
+        #expect(job.variables.map(\.key) == ["A", "B"])
+        #expect(job.unreadableFields == ["variables[#1]"])
+    }
+
+    /// 整個 `variables` 不是陣列時仍記整個欄位名，與其他欄位同形。
+    @Test
+    func `variables of the wrong shape are recorded as one field`() throws {
+        let job: JobResponse = try decodeJob(#"{"id":1,"token":"t","variables":"CI_PROJECT_PATH=group/app"}"#)
+        #expect(job.variables.isEmpty)
+        #expect(job.unreadableFields == ["variables"])
+    }
+
+    /// 讀不懂的變數要擋下這件 job：其餘變數還在，不代表這件事可以照跑。
+    @Test
+    func `unreadable variable blocks admission`() {
+        let job: JobResponse = .init(id: 1, token: "t", unreadableFields: ["variables[CI_ODDITY]"])
+        guard case let .rejected(rejection) = JobAdmission.review(job) else {
+            Issue.record("讀不懂的變數必須擋下收件")
+            return
+        }
+        #expect(rejection.features == [.unreadablePayloadField(name: "variables[CI_ODDITY]")])
+    }
+
     /// 能力欄位形狀變了不得讓整包解不出來——那會讓已指派的 job 靜靜消失。
     @Test
     func `unexpected capability shape is recorded instead of throwing`() throws {
