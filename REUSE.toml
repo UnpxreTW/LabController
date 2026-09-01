@@ -9,6 +9,8 @@ path = [
 	"NOTICE",
 	"Package.resolved",
 	"README.md",
+	"docs/CODEOWNERS",
+	"docs/SECURITY.md",
 ]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Unpxre (GitHub: UnpxreTW)"
