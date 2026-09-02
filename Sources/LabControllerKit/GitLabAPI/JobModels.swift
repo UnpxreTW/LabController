@@ -94,11 +94,21 @@ public struct GitInfo: Decodable, Sendable, Equatable {
     /// 目標 commit sha。
     public let sha: String
 
+    /// 站台指定的取碼 refspec。
+    ///
+    /// 合併請求那類 pipeline 跑的不是分支頂端，而是站台另外算出來的一個 commit，它只掛在
+    /// `refs/merge-requests/<n>/head` 這種一般 fetch 抓不到的 ref 下；站台因此改送一組
+    /// refspec，要求照它給的抓。**本側把每一條當不透明字串原樣交給 `git`**——站台送什麼形狀
+    /// 是站台的事，本側去猜只會在它換形狀時錯得無聲無息。缺席或空陣列＝一般 push 形，照
+    /// ``ref`` 抓即可。
+    public let refspecs: [String]
+
     /// 以顯式欄位建立（測試用）。
-    public init(repoURL: String, ref: String, sha: String) {
+    public init(repoURL: String, ref: String, sha: String, refspecs: [String] = []) {
         self.repoURL = repoURL
         self.ref = ref
         self.sha = sha
+        self.refspecs = refspecs
     }
 
     /// 解碼；任一欄位缺席以空字串補。
@@ -110,6 +120,7 @@ public struct GitInfo: Decodable, Sendable, Equatable {
         self.repoURL = try container.decodeIfPresent(String.self, forKey: .repoURL) ?? ""
         self.ref = try container.decodeIfPresent(String.self, forKey: .ref) ?? ""
         self.sha = try container.decodeIfPresent(String.self, forKey: .sha) ?? ""
+        self.refspecs = try container.decodeIfPresent([String].self, forKey: .refspecs) ?? []
     }
 
     /// 站台送了 `git_info`、但少了取碼所需的座標。
@@ -126,15 +137,19 @@ public struct GitInfo: Decodable, Sendable, Equatable {
         case repoURL = "repo_url"
         case ref
         case sha
+        case refspecs
     }
 }
 
 /// 印出來的網址一律抹掉 userinfo。
 extension GitInfo: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
 
-    /// 抹掉 userinfo 的網址加上 ref／sha。
+    /// 抹掉 userinfo 的網址加上 ref／sha，以及 refspec 條數。
+    ///
+    /// refspec 只印條數不印內容：一行敘述要保持有界，而「站台有沒有另外指定取碼路徑」這件事
+    /// 條數就答得完；要看內容走 `dump`。
     public var description: String {
-        "GitInfo(repo: \(Self.withoutUserInfo(repoURL)), ref: \(ref), sha: \(sha))"
+        "GitInfo(repo: \(Self.withoutUserInfo(repoURL)), ref: \(ref), sha: \(sha), refspecs: \(refspecs.count))"
     }
 
     /// 與 `description` 相同；debug 情境更需要這層保護，不是更不需要。
@@ -146,7 +161,12 @@ extension GitInfo: CustomStringConvertible, CustomDebugStringConvertible, Custom
     public var customMirror: Mirror {
         .init(
             self,
-            children: ["repoURL": Self.withoutUserInfo(repoURL), "ref": ref, "sha": sha],
+            children: [
+                "repoURL": Self.withoutUserInfo(repoURL),
+                "ref": ref,
+                "sha": sha,
+                "refspecs": refspecs,
+            ],
             displayStyle: .struct
         )
     }

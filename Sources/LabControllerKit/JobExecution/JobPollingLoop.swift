@@ -102,6 +102,13 @@ public struct JobPollingLoop: Sendable {
         }
     }
 
+    /// 領件時向站台宣告的能力。
+    ///
+    /// **只宣告這一層真的做得到的**：站台在指派前照這份自述篩，宣告不足會讓需要該能力的 job
+    /// 被判死（見 ``RunnerFeatures``），宣告過頭則換成領到之後才失敗。目前只有 `refspecs`
+    /// 為真——取碼腳本已照站台指定的 refspec 抓（見 ``JobWorkspace``），其餘能力尚未實作。
+    public static let declaredFeatures: RunnerFeatures = .init(refspecs: true)
+
     /// 協議層 client；領件與回寫共用同一個。
     public let client: JobRequestClient
 
@@ -150,7 +157,8 @@ public struct JobPollingLoop: Sendable {
         let result: JobRequestResult = try await client.requestJob(
             host: configuration.host,
             token: configuration.runnerToken,
-            lastUpdate: cursor
+            lastUpdate: cursor,
+            info: .init(features: Self.declaredFeatures)
         )
         guard case let .assigned(job) = result.outcome else {
             return .init(disposition: .idle, cursor: result.lastUpdate)

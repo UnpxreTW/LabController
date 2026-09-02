@@ -153,6 +153,23 @@ private final class JobPollingLoopTests {
         #expect(!leaked)
     }
 
+    /// 領件時要把 refspec 能力宣告出去：不宣告，合併請求那類 pipeline 的 job 一領走就被判死。
+    @Test
+    func `declares the refspec capability when asking for work`() async throws {
+        let transport: ScriptedPollTransport = .init([.respond(.init(statusCode: 204))])
+        let loop: JobPollingLoop = .init(
+            client: .init(transport: transport),
+            backend: InMemoryExecutionBackend(),
+            reporter: .init(client: .init(transport: transport), wait: { _ in }),
+            configuration: configuration
+        )
+        _ = try await loop.poll(cursor: nil)
+        let requests: [HTTPRequest] = transport.requests.withLock { $0 }
+        let info: [String: Any] = try #require(try requestBody(of: requests[0])["info"] as? [String: Any])
+        let features: [String: Any] = try #require(info["features"] as? [String: Any])
+        #expect(features["refspecs"] as? Bool == true)
+    }
+
     /// 沒領到也要把游標帶回來——long-poll 的 hold 就是靠它，漏帶等於每一輪都白等。
     @Test
     func `carries the cursor forward when no job is available`() async throws {

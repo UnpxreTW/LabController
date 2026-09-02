@@ -231,6 +231,31 @@ private final class JobPayloadDecodingTests {
         #expect(job.unreadableFields.isEmpty)
     }
 
+    /// 合併請求那類 pipeline 會另外送一組 refspec；原樣收下，一條都不能少。
+    @Test
+    func `keeps the refspecs the site asks us to fetch by`() throws {
+        let job: JobResponse = try decodeJob(#"""
+        {"id":1,"token":"t","git_info":{"repo_url":"https://example.invalid/g/a.git","ref":"main","sha":"abc",
+        "refspecs":["+refs/merge-requests/7/head:refs/remotes/origin/merge-requests/7/head",
+        "+refs/heads/main:refs/remotes/origin/main"]}}
+        """#)
+        #expect(job.gitInfo?.refspecs == [
+            "+refs/merge-requests/7/head:refs/remotes/origin/merge-requests/7/head",
+            "+refs/heads/main:refs/remotes/origin/main",
+        ])
+        #expect(job.unreadableFields.isEmpty)
+    }
+
+    /// 一般 push 形不帶 refspec；缺席即空陣列，不是解碼失敗。
+    @Test
+    func `treats a payload without refspecs as an ordinary push`() throws {
+        let job: JobResponse = try decodeJob(#"""
+        {"id":1,"token":"t","git_info":{"repo_url":"https://example.invalid/g/a.git","ref":"main","sha":"abc"}}
+        """#)
+        #expect(job.gitInfo?.refspecs.isEmpty == true)
+        #expect(job.unreadableFields.isEmpty)
+    }
+
     /// `image` 形狀讀不懂時只記 unreadable，不另外編一個名字出來誤導 trace。
     @Test
     func `unreadable image shape reports only the field`() throws {
