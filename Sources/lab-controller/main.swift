@@ -79,21 +79,24 @@ if let run: RunCommand = parsedCommand as? RunCommand {
         transport: UnixSocketNymphTransport(socketPath: run.resolvedSocketPath),
         configuration: run.backendConfiguration
     )
+    // 停止訊號同時當旗標與等待的鬧鐘：兩輪之間的退避有三十秒，只翻旗標的話喊停要等睡滿才被
+    // 讀到，服務管理器的收工寬限比那段等待短時，閒著的行程每次停止都以逾時強殺收場。取消只
+    // 落在退避那顆另開的 Task 上、不碰正在跑的 job。訊號只接在兩輪之間的退避上——回寫重送前
+    // 的等待是另一支、照樣睡滿，那一段提早醒等於對著仍在故障的站台立刻重送。
+    let stopSignal: StopSignal = .init()
     let loop: JobPollingLoop = .init(
         backend: backend,
-        configuration: .init(host: run.host, runnerToken: runnerToken, image: run.image)
+        configuration: .init(host: run.host, runnerToken: runnerToken, image: run.image),
+        wait: { seconds in await stopSignal.wait(seconds) }
     )
-    let stopRequested: Atomic<Bool> = .init(false)
-    let sources: [any DispatchSourceSignal] = installStopHandlers {
-        stopRequested.store(true, ordering: .relaxed)
-    }
+    let sources: [any DispatchSourceSignal] = installStopHandlers { stopSignal.stop() }
     // 站台位址只印 scheme／host／port：`--host` 收得下 `https://oauth2:<token>@…` 這種形狀，
     // 原樣印出等於把憑證寫進行程的第一行 stdout。
     let safeHost: String = GitLabAPIError.safeLocation(of: run.host)
     print("lab-controller: polling \(safeHost) guest=\(run.os.rawValue) image=\(run.golden)")
     await loop.run(
         stopAfterFirstJob: run.once,
-        isStopped: { stopRequested.load(ordering: .relaxed) },
+        isStopped: { stopSignal.isStopped },
         log: { print("lab-controller: \($0)") }
     )
     withExtendedLifetime(sources) {}
