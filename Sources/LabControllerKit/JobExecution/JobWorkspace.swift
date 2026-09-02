@@ -80,17 +80,24 @@ public struct JobWorkspace: Sendable, Equatable {
         var checkoutEnvironmentFilePath: String?
         if let git: GitInfo = plan.git {
             guard !git.hasIncompleteCoordinates else { throw JobWorkspaceError.incompleteGitCoordinates }
-            let coordinates: [String] = [
+            var coordinates: [String] = [
                 Self.export(name: "\(Self.reservedPrefix)REPO_URL", value: git.repoURL),
                 Self.export(name: "\(Self.reservedPrefix)REF", value: git.ref),
                 Self.export(name: "\(Self.reservedPrefix)SHA", value: git.sha),
             ]
+            for (index, refspec) in git.refspecs.enumerated() {
+                coordinates.append(Self.export(name: Self.refspecVariable(at: index), value: refspec))
+            }
             let environmentPath: String = "\(root)/checkout-env.sh"
             files.append(try .init(path: environmentPath,
                                    contents: .init(Self.environmentFile(exports: coordinates).utf8)))
             let path: String = "\(root)/checkout.sh"
             let prelude: String = Self.prelude(sourcing: environmentPath, in: checkoutDirectory, entering: false)
-            let script: String = Self.checkoutScript(hasRef: !git.ref.isEmpty, directory: checkoutDirectory)
+            let script: String = Self.checkoutScript(
+                hasRef: !git.ref.isEmpty,
+                refspecCount: git.refspecs.count,
+                directory: checkoutDirectory
+            )
             files.append(try .init(path: path, contents: .init((prelude + script).utf8)))
             checkoutScriptPath = path
             checkoutEnvironmentFilePath = environmentPath
@@ -159,9 +166,11 @@ public struct JobWorkspace: Sendable, Equatable {
     /// remote add` 之後那份網址也會落在取碼目錄的 `.git/config`。兩者都止於這個一次性環境、
     /// 隨焚毀消失；要真的收乾淨得換一種不經參數也不落設定檔的憑證傳遞形，那不是這一片的事。
     ///
-    /// ⚠️ 只涵蓋分支與 tag 這種一般 push 形。合併請求的 detached ref 另有形狀（站台把它放在
-    /// `refs/merge-requests/<n>/head`，並另外送一組脈絡變數），那是下一片的事、這裡不猜。
-    private static func checkoutScript(hasRef: Bool, directory: String) -> String {
+    /// **站台指定 refspec 時改照它抓**：合併請求那類 pipeline 要跑的 commit 掛在
+    /// `refs/merge-requests/<n>/head` 這種 ref 下，照 ref 抓抓不到、job 於是死在取碼那一步。
+    /// refspec 的內容本側不解讀，逐條經環境變數送進 `git fetch` 的參數位；停在哪個版本仍由
+    /// sha 決定，與一般 push 形同一條規則。
+    private static func checkoutScript(hasRef: Bool, refspecCount: Int, directory: String) -> String {
         let quoted: String = singleQuoted(directory)
         var lines: [String] = [
             "rm -rf \(quoted)",
@@ -170,10 +179,26 @@ public struct JobWorkspace: Sendable, Equatable {
             "git init --quiet",
             "git remote add origin \"$\(reservedPrefix)REPO_URL\"",
         ]
-        lines.append(hasRef ? "git fetch --force --quiet origin \"$\(reservedPrefix)REF\""
-            : "git fetch --force --quiet origin")
+        if refspecCount > 0 {
+            let arguments: String = (0..<refspecCount).map { "\"$\(refspecVariable(at: $0))\"" }.joined(separator: " ")
+            lines.append("git fetch --force --quiet origin \(arguments)")
+        } else {
+            lines.append(hasRef ? "git fetch --force --quiet origin \"$\(reservedPrefix)REF\""
+                : "git fetch --force --quiet origin")
+        }
         lines.append("git checkout --quiet --detach \"$\(reservedPrefix)SHA\"")
         return lines.joined(separator: "\n") + "\n"
+    }
+
+    /// 第 `index` 條 refspec 的環境變數名。
+    ///
+    /// 一條一個變數、名字取索引：POSIX shell 沒有陣列，而把整串塞進一個變數再靠斷詞展開，
+    /// 會讓 refspec 裡的空白與 glob 字元改變參數個數——那是站台送什麼、本側就執行什麼的形狀。
+    ///
+    /// - Parameter index: refspec 在 payload 裡的位置。
+    /// - Returns: 對應的環境變數名。
+    private static func refspecVariable(at index: Int) -> String {
+        "\(reservedPrefix)REFSPEC_\(index)"
     }
 
     /// 一行 `export`；值一律以單引號包起來。

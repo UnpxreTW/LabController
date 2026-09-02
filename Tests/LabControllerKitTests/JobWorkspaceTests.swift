@@ -133,6 +133,51 @@ private final class JobWorkspaceTests {
         #expect(script.contains("git checkout --quiet --detach \"$LABCTL_SHA\""))
     }
 
+    /// 站台指定了 refspec 就照它抓：合併請求要跑的 commit 照 ref 抓不到。
+    @Test
+    func `fetches by the refspecs the site specified`() throws {
+        let plan: JobPlan = .init(
+            jobIdentifier: 1,
+            git: .init(
+                repoURL: "https://gitlab.example/group/project.git",
+                ref: "main",
+                sha: "deadbeef",
+                refspecs: [
+                    "+refs/merge-requests/7/head:refs/remotes/origin/merge-requests/7/head",
+                    "+refs/heads/main:refs/remotes/origin/main",
+                ]
+            ),
+            timeoutSeconds: 60
+        )
+        let workspace: JobWorkspace = try .init(plan: plan, root: root)
+        let path: String = try #require(workspace.checkoutScriptPath)
+        let script: String = try contents(of: path, in: workspace)
+        let checkoutEnvironment: String = try #require(workspace.checkoutEnvironmentFilePath)
+        let environment: String = try contents(of: checkoutEnvironment, in: workspace)
+        #expect(script.contains("git fetch --force --quiet origin \"$LABCTL_REFSPEC_0\" \"$LABCTL_REFSPEC_1\""))
+        #expect(script.contains("\"$LABCTL_REF\"") == false)
+        #expect(script.contains("git checkout --quiet --detach \"$LABCTL_SHA\""))
+        #expect(environment.contains(
+            "export LABCTL_REFSPEC_0='+refs/merge-requests/7/head:refs/remotes/origin/merge-requests/7/head'"
+        ))
+        #expect(environment.contains("export LABCTL_REFSPEC_1='+refs/heads/main:refs/remotes/origin/main'"))
+    }
+
+    /// refspec 的內容不進命令列本文：它是 payload 值，與其他座標同一條規則。
+    @Test
+    func `keeps refspec values out of the script body`() throws {
+        let plan: JobPlan = .init(
+            jobIdentifier: 1,
+            git: .init(repoURL: "https://gitlab.example/group/project.git", ref: "main", sha: "deadbeef",
+                       refspecs: ["+refs/merge-requests/7/head:refs/remotes/origin/merge-requests/7/head"]),
+            timeoutSeconds: 60
+        )
+        let workspace: JobWorkspace = try .init(plan: plan, root: root)
+        let path: String = try #require(workspace.checkoutScriptPath)
+        let script: String = try contents(of: path, in: workspace)
+        #expect(script.contains("merge-requests") == false)
+    }
+
     /// 倉庫網址走環境變數、不進命令列：命令列在環境裡是誰都看得到的。
     @Test
     func `keeps the repository URL out of the command line`() throws {
