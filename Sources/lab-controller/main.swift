@@ -12,6 +12,22 @@ import Foundation
 import LabControllerKit
 import Synchronization
 
+// SIGTERM／SIGINT：先關掉預設處置，改由 DispatchSource 轉成呼叫端給的停止動作。
+// 回傳的 source 必須由呼叫端持有到行程結束，放掉即失去訊號處理。
+private func installStopHandlers(_ handler: @escaping @Sendable () -> Void) -> [any DispatchSourceSignal] {
+    _ = signal(SIGINT, SIG_IGN)
+    _ = signal(SIGTERM, SIG_IGN)
+    let signalQueue: DispatchQueue = .init(label: "lab-controller.signal")
+    return [SIGINT, SIGTERM].map { number in
+        let source: any DispatchSourceSignal = DispatchSource.makeSignalSource(signal: number, queue: signalQueue)
+        // 處理器在 signalQueue 上執行、非 MainActor；標 @Sendable 避免繼承頂層的 MainActor
+        // 隔離，否則進入時的 executor 斷言會在非主佇列觸發 dispatch_assert_queue 崩潰。
+        source.setEventHandler { @Sendable in handler() }
+        source.resume()
+        return source
+    }
+}
+
 // 所有參數皆於啟動時由 CLI 引數注入；不讀任何設定檔。未知旗標、缺值或格式不合法由
 // ArgumentParser 直接印出用法說明並以非零狀態結束行程。
 let parsedCommand: any ParsableCommand
@@ -50,6 +66,41 @@ if let register: RegisterCommand = parsedCommand as? RegisterCommand {
     exit(0)
 }
 
+// `run` 子命令：領件迴圈，跑到收到停止訊號（或 `--once` 經手完一件）為止。
+if let run: RunCommand = parsedCommand as? RunCommand {
+    let runnerToken: String
+    do {
+        runnerToken = try RunnerTokenFile.read(atPath: run.tokenFile)
+    } catch {
+        FileHandle.standardError.write(Data("lab-controller: token file unusable: \(error)\n".utf8))
+        exit(1)
+    }
+    let backend: NymphExecutionBackend = .init(
+        transport: UnixSocketNymphTransport(socketPath: run.resolvedSocketPath),
+        configuration: run.backendConfiguration
+    )
+    let loop: JobPollingLoop = .init(
+        backend: backend,
+        configuration: .init(host: run.host, runnerToken: runnerToken, image: run.image)
+    )
+    let stopRequested: Atomic<Bool> = .init(false)
+    let sources: [any DispatchSourceSignal] = installStopHandlers {
+        stopRequested.store(true, ordering: .relaxed)
+    }
+    // 站台位址只印 scheme／host／port：`--host` 收得下 `https://oauth2:<token>@…` 這種形狀，
+    // 原樣印出等於把憑證寫進行程的第一行 stdout。
+    let safeHost: String = GitLabAPIError.safeLocation(of: run.host)
+    print("lab-controller: polling \(safeHost) guest=\(run.os.rawValue) image=\(run.golden)")
+    await loop.run(
+        stopAfterFirstJob: run.once,
+        isStopped: { stopRequested.load(ordering: .relaxed) },
+        log: { print("lab-controller: \($0)") }
+    )
+    withExtendedLifetime(sources) {}
+    print("lab-controller: stopped")
+    exit(0)
+}
+
 // 其他內建子命令（如 `help`、`--help` 解析出的 HelpCommand）：交回 ArgumentParser 執行後結束行程。
 guard let command: LabControllerCommand = parsedCommand as? LabControllerCommand else {
     do {
@@ -80,20 +131,10 @@ let heartbeat: Task<Void, Never> = Task {
     }
 }
 
-// SIGTERM／SIGINT：先關掉預設處置，改由 DispatchSource 轉成停止旗標＋取消心跳。
-_ = signal(SIGINT, SIG_IGN)
-_ = signal(SIGTERM, SIG_IGN)
-let signalQueue: DispatchQueue = .init(label: "lab-controller.signal")
-let signalSources: [any DispatchSourceSignal] = [SIGINT, SIGTERM].map { number in
-    let source: any DispatchSourceSignal = DispatchSource.makeSignalSource(signal: number, queue: signalQueue)
-    // 處理器在 signalQueue 上執行、非 MainActor；標 @Sendable 避免繼承頂層的 MainActor
-    // 隔離，否則進入時的 executor 斷言會在非主佇列觸發 dispatch_assert_queue 崩潰。
-    source.setEventHandler { @Sendable in
-        stopRequested.store(true, ordering: .relaxed)
-        heartbeat.cancel()
-    }
-    source.resume()
-    return source
+// SIGTERM／SIGINT：轉成停止旗標＋取消心跳。
+let signalSources: [any DispatchSourceSignal] = installStopHandlers {
+    stopRequested.store(true, ordering: .relaxed)
+    heartbeat.cancel()
 }
 
 await heartbeat.value
