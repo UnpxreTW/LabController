@@ -6,6 +6,7 @@
 //
 //  SPDX-License-Identifier: Apache-2.0
 
+import Foundation
 import LabControllerKit
 import Testing
 
@@ -43,5 +44,37 @@ private final class GitLabAPIErrorTests {
         #expect(GitLabAPIError.safeLocation(of: "h.invalid") == GitLabAPIError.unparsableLocation)
         let location: String = GitLabAPIError.safeLocation(of: "https://oauth2:glpat-synthetic@gitlab example.com")
         #expect(!location.contains("glpat-synthetic"))
+    }
+
+    /// 傳輸層拋的 `URLError` 帶著送出去的整條網址，描述只留錯誤碼與收斂後的位置。
+    @Test
+    func `transport errors are described without the credentials they carry`() {
+        let leaky: String = "https://oauth2:glpat-synthetic@gitlab.example.com/api/v4/jobs/request"
+        guard let url: URL = .init(string: leaky) else {
+            Issue.record("合成網址字面值應解得開")
+            return
+        }
+        let error: URLError = .init(.cannotConnectToHost, userInfo: [NSURLErrorFailingURLErrorKey: url])
+        #expect(String(describing: error).contains("glpat-synthetic"))
+        let description: String = GitLabAPIError.safeDescription(of: error)
+        #expect(!description.contains("glpat-synthetic"))
+        #expect(description.contains("https://gitlab.example.com"))
+        #expect(description.contains("\(URLError.Code.cannotConnectToHost.rawValue)"))
+    }
+
+    /// 拿不到失敗網址時不編一個出來，回固定替代字串。
+    @Test
+    func `transport errors without a failing url yield the fixed placeholder`() {
+        let description: String = GitLabAPIError.safeDescription(of: URLError(.timedOut))
+        #expect(description.contains(GitLabAPIError.unparsableLocation))
+    }
+
+    /// 非傳輸層的錯誤照原樣描述：本模組自己的錯誤在建立處就已收斂。
+    @Test
+    func `other errors keep their own description`() {
+        #expect(
+            GitLabAPIError.safeDescription(of: GitLabAPIError.unexpectedStatus(403))
+                == String(describing: GitLabAPIError.unexpectedStatus(403))
+        )
     }
 }
