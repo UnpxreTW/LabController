@@ -255,6 +255,34 @@ private final class JobPollingLoopTests {
         #expect(polls.count == 2)
     }
 
+    /// 這一輪沒有工作也要退開再敲：站台沒把連線 hold 住時，這段等待是唯一擋住緊迴圈的東西。
+    @Test
+    func `backs off before polling again when no job is available`() async throws {
+        let transport: ScriptedPollTransport = .init([
+            .respond(.init(statusCode: 204, headers: ["X-GitLab-Last-Update": "cursor-2"])),
+            .respond(assignedJob),
+            .respond(.init(statusCode: 200)),
+        ])
+        let waits: Mutex<[TimeInterval]> = .init([])
+        let loop: JobPollingLoop = .init(
+            client: .init(transport: transport),
+            backend: InMemoryExecutionBackend(),
+            reporter: .init(client: .init(transport: transport), wait: { _ in }),
+            configuration: configuration,
+            wait: { seconds in waits.withLock { $0.append(seconds) } }
+        )
+        let lines: Mutex<[String]> = .init([])
+        await loop.run(stopAfterFirstJob: true, isStopped: { false }, log: { line in
+            lines.withLock { $0.append(line) }
+        })
+        #expect(waits.withLock { $0 } == [30])
+        #expect(lines.withLock { $0.first } == "no job available")
+        let polls: [HTTPRequest] = transport.requests.withLock { $0.filter { $0.url.lastPathComponent == "request" } }
+        #expect(polls.count == 2)
+        // 退開一段再敲不該把游標弄丟：下一輪照樣帶著站台上一輪發的那一個。
+        #expect(try requestBody(of: polls[1])["last_update"] as? String == "cursor-2")
+    }
+
     /// 領件失敗那一行不帶憑證：傳輸層的錯誤把整條網址帶在身上，而站台位址收得下憑證。
     @Test
     func `keeps credentials out of the line logged for a failed request`() async throws {

@@ -41,10 +41,11 @@ public struct JobPollingLoop: Sendable {
         /// 本機執行面的設定（工作目錄根、shell）。
         public let runner: JobRunnerConfiguration
 
-        /// 領件這一步失敗後，隔多久再敲下一次。
+        /// 領件這一輪沒帶回工作時，隔多久再敲下一次；**失敗與「此刻沒有工作」共用這個秒數**。
         ///
-        /// 失敗多半是站台或網路暫時不在，退開一段再試即可；不退直接重敲會在站台掛掉的期間
-        /// 打出一串緊迴圈，把本來只是慢的情況變成兩邊都更忙。
+        /// 失敗多半是站台或網路暫時不在，退開一段再試即可。沒領到工作也要退：站台端的
+        /// long-poll 是盡力而為——它沒把連線 hold 住時（該功能沒開、或連線被中間層提早收掉），
+        /// 回應是立刻回來的，本側不退就成了一串緊迴圈，把本來只是閒著的情況變成兩邊都更忙。
         public let retryInterval: TimeInterval
 
         /// 逐欄建立。
@@ -54,7 +55,7 @@ public struct JobPollingLoop: Sendable {
         ///   - runnerToken: runner 認證 token。
         ///   - image: 開執行環境用的基底。
         ///   - runner: 本機執行面設定；預設值見 ``JobRunnerConfiguration``。
-        ///   - retryInterval: 領件失敗後的退避秒數；預設 30。
+        ///   - retryInterval: 領不到件（失敗，或此刻沒有工作）後的退避秒數；預設 30。
         public init(
             host: String,
             runnerToken: String,
@@ -209,9 +210,13 @@ public struct JobPollingLoop: Sendable {
     /// runner 從此不再出現在站台的候選裡，而沒有任何人會發現。**回寫失敗則不同**：那件 job 已經
     /// 經手過，紀錄要指名是哪一件，而 `--once` 照樣在那裡收工。
     ///
-    /// **喊停最慢會等到當下這一輪走完**：領件是 long-poll，站台端最長 hold 到五十秒左右；跑到
-    /// 一半的 job 更不能從中間丟下——那會留下一台沒人收的 guest，以及站台端一件永遠停在執行中
-    /// 的 job。
+    /// **沒領到工作也要退開一段再敲**：站台端的 long-poll 是盡力而為，它沒把連線 hold 住時
+    /// 回應立刻就回來，本側不退就會以每秒十幾次的速度重敲同一支端點——那既是對站台的無謂
+    /// 壓力，也會把紀錄灌成一片同一行字。退避秒數與領件失敗共用 ``Configuration/retryInterval``。
+    ///
+    /// **喊停最慢會等到當下這一輪走完**：領件是 long-poll，站台端最長 hold 到五十秒左右，接著
+    /// 還可能有一段退避（停止是旗標、不會把等待喚醒）；跑到一半的 job 更不能從中間丟下——那會
+    /// 留下一台沒人收的 guest，以及站台端一件永遠停在執行中的 job。
     ///
     /// - Parameters:
     ///   - cursor: 起始游標；預設 nil。
@@ -249,6 +254,12 @@ public struct JobPollingLoop: Sendable {
             currentCursor = cycle.cursor
             log(Self.summary(of: cycle.disposition))
             if stopAfterFirstJob, cycle.didHandleJob { return }
+            // 這一輪沒有工作：退開再敲。站台 hold 住時這段等待只是把下一次敲門往後挪一點，
+            // 站台沒 hold 時它就是唯一擋住緊迴圈的東西——退避留在迴圈這一層，`poll(cursor:)`
+            // 維持「敲一次、把結果帶回來」不自己等待。
+            if case .idle = cycle.disposition {
+                await wait(configuration.retryInterval)
+            }
         }
     }
 
