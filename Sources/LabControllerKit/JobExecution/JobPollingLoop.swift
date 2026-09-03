@@ -122,8 +122,17 @@ public struct JobPollingLoop: Sendable {
     /// 這圈迴圈的設定。
     public let configuration: Configuration
 
-    /// 退避時等待的方式；測試注入不真的睡的版本。
+    /// 兩輪之間退避時等待的方式；測試注入不真的睡的版本。
+    ///
+    /// **只管迴圈自己的退避**：這幾處醒來後下一步都是回到 `while` 條件重問要不要停，提早醒
+    /// 只會提早收工。回寫重送的等待走 ``resendWait``、不共用這一支。
     private let wait: @Sendable (TimeInterval) async -> Void
+
+    /// 回寫重送前等待的方式；測試注入不真的睡的版本。
+    ///
+    /// 與 ``wait`` 分開的理由見 ``deliver(_:to:of:)``：那一段等完就直接往站台送第二次，被提早
+    /// 叫醒等於對著同一個故障端點立刻重送。
+    private let resendWait: @Sendable (TimeInterval) async -> Void
 
     /// 逐欄建立。
     ///
@@ -132,19 +141,22 @@ public struct JobPollingLoop: Sendable {
     ///   - backend: 執行後端。
     ///   - reporter: 回寫用的回報器。
     ///   - configuration: 迴圈設定。
-    ///   - wait: 退避時等待的方式；預設真的睡指定秒數。
+    ///   - wait: 兩輪之間退避時等待的方式；預設真的睡指定秒數。
+    ///   - resendWait: 回寫重送前等待的方式；預設真的睡指定秒數。
     public init(
         client: JobRequestClient = .init(),
         backend: any ExecutionBackend,
         reporter: JobResultReporter = .init(),
         configuration: Configuration,
-        wait: @escaping @Sendable (TimeInterval) async -> Void = JobPollingLoop.sleep
+        wait: @escaping @Sendable (TimeInterval) async -> Void = JobPollingLoop.sleep,
+        resendWait: @escaping @Sendable (TimeInterval) async -> Void = JobPollingLoop.sleep
     ) {
         self.client = client
         self.backend = backend
         self.reporter = reporter
         self.configuration = configuration
         self.wait = wait
+        self.resendWait = resendWait
     }
 
     /// 領一件：領到就跑完並回寫，沒領到就只把游標帶回來。
@@ -190,6 +202,10 @@ public struct JobPollingLoop: Sendable {
     /// 兩次都送不出去才拋，且拋的是帶著 job 識別碼的 ``JobDeliveryFailure``，不是原始的連線
     /// 層錯誤：呼叫端要靠這個型別分辨「沒領到」與「領到跑完但送不回去」。
     ///
+    /// **中間那段等待喊停也不會縮短**：它走的是 ``resendWait``、不是迴圈那支叫得醒的 ``wait``。
+    /// 等完就直接往站台送第二次，提早醒等於對著仍在故障的端點立刻重送——這件 job 的結果就這
+    /// 一次機會，退避縮成零等於把它丟掉。
+    ///
     /// - Parameters:
     ///   - report: 要送出的結果。
     ///   - target: 回寫座標。
@@ -204,7 +220,7 @@ public struct JobPollingLoop: Sendable {
         do {
             return try await reporter.report(report, to: target)
         } catch {
-            await wait(configuration.retryInterval)
+            await resendWait(configuration.retryInterval)
         }
         do {
             return try await reporter.report(report, to: target)
@@ -223,9 +239,12 @@ public struct JobPollingLoop: Sendable {
     /// 回應立刻就回來，本側不退就會以每秒十幾次的速度重敲同一支端點——那既是對站台的無謂
     /// 壓力，也會把紀錄灌成一片同一行字。退避秒數與領件失敗共用 ``Configuration/retryInterval``。
     ///
-    /// **喊停最慢會等到當下這一輪走完**：領件是 long-poll，站台端最長 hold 到五十秒左右，接著
-    /// 還可能有一段退避（停止是旗標、不會把等待喚醒）；跑到一半的 job 更不能從中間丟下——那會
-    /// 留下一台沒人收的 guest，以及站台端一件永遠停在執行中的 job。
+    /// **喊停最慢會等到當下這一輪走完**：領件是 long-poll，回應多久回來由站台端決定；跑到一半的
+    /// job 更不能從中間丟下——那會留下一台沒人收的 guest，以及站台端一件永遠停在執行中的 job。
+    /// 兩輪之間的退避則**叫得醒**——注入 ``StopSignal/wait(_:)`` 當 `wait` 時，喊停會把那幾段
+    /// 等待直接叫斷；沒注入就退回預設的 ``sleep(_:)``、只能等睡滿。**叫得醒的只有這幾段**：
+    /// 它們醒來後下一步都是回到本迴圈的停止條件。回寫重送前的那段等待走另一支 ``resendWait``、
+    /// 不受喊停影響，理由見 ``deliver(_:to:of:)``。
     ///
     /// - Parameters:
     ///   - cursor: 起始游標；預設 nil。
@@ -276,6 +295,9 @@ public struct JobPollingLoop: Sendable {
     }
 
     /// 真的睡指定秒數；取消時直接回來，由呼叫端的停止旗標決定下一步。
+    ///
+    /// **這一份叫不醒**：喊停翻的旗標要等睡滿才會被讀到。要讓喊停立刻結束等待，建立迴圈時把
+    /// `wait` 換成一支 ``StopSignal`` 的 ``StopSignal/wait(_:)``。
     ///
     /// - Parameter seconds: 要睡多久。
     public static func sleep(_ seconds: TimeInterval) async {

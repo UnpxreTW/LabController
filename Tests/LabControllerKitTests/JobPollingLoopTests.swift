@@ -337,7 +337,8 @@ private final class JobPollingLoopTests {
             backend: InMemoryExecutionBackend(),
             reporter: .init(client: .init(transport: transport), wait: { _ in }),
             configuration: configuration,
-            wait: { _ in }
+            wait: { _ in },
+            resendWait: { _ in }
         )
         let lines: Mutex<[String]> = .init([])
         await loop.run(stopAfterFirstJob: true, isStopped: { false }, logger: CapturingLogHandler.logger { _, line in
@@ -358,7 +359,8 @@ private final class JobPollingLoopTests {
             backend: InMemoryExecutionBackend(),
             reporter: .init(client: .init(transport: transport), wait: { _ in }),
             configuration: configuration,
-            wait: { _ in }
+            wait: { _ in },
+            resendWait: { _ in }
         )
         let lines: Mutex<[String]> = .init([])
         await loop.run(stopAfterFirstJob: true, isStopped: { false }, logger: CapturingLogHandler.logger { _, line in
@@ -377,15 +379,19 @@ private final class JobPollingLoopTests {
             .respond(assignedJob), .fail, .respond(.init(statusCode: 200)),
         ])
         let waits: Mutex<[TimeInterval]> = .init([])
+        let resendWaits: Mutex<[TimeInterval]> = .init([])
         let loop: JobPollingLoop = .init(
             client: .init(transport: transport),
             backend: InMemoryExecutionBackend(),
             reporter: .init(client: .init(transport: transport), wait: { _ in }),
             configuration: configuration,
-            wait: { seconds in waits.withLock { $0.append(seconds) } }
+            wait: { seconds in waits.withLock { $0.append(seconds) } },
+            resendWait: { seconds in resendWaits.withLock { $0.append(seconds) } }
         )
         let cycle: JobCycle = try await loop.poll(cursor: nil)
-        #expect(waits.withLock { $0 } == [30])
+        // 重送前的等待走自己那一支：走迴圈那支的話，喊停會把它縮成零、對故障端點立刻重送。
+        #expect(resendWaits.withLock { $0 } == [30])
+        #expect(waits.withLock { $0 }.isEmpty)
         #expect(cycle.disposition == .handled(jobIdentifier: 7, outcome: .completed, delivery: .init(
             acceptance: .written, traceIsComplete: true, updateAttempts: 1
         )))
@@ -400,7 +406,8 @@ private final class JobPollingLoopTests {
             backend: InMemoryExecutionBackend(),
             reporter: .init(client: .init(transport: transport), wait: { _ in }),
             configuration: configuration,
-            wait: { _ in }
+            wait: { _ in },
+            resendWait: { _ in }
         )
         await #expect(throws: JobDeliveryFailure.self) {
             _ = try await loop.poll(cursor: nil)
@@ -416,7 +423,8 @@ private final class JobPollingLoopTests {
             backend: InMemoryExecutionBackend(),
             reporter: .init(client: .init(transport: transport), wait: { _ in }),
             configuration: configuration,
-            wait: { _ in }
+            wait: { _ in },
+            resendWait: { _ in }
         )
         let lines: Mutex<[String]> = .init([])
         await loop.run(stopAfterFirstJob: true, isStopped: { false }, logger: CapturingLogHandler.logger { _, line in
@@ -436,13 +444,78 @@ private final class JobPollingLoopTests {
             backend: InMemoryExecutionBackend(),
             reporter: .init(client: .init(transport: transport), wait: { _ in }),
             configuration: configuration,
-            wait: { _ in }
+            wait: { _ in },
+            resendWait: { _ in }
         )
         let lines: Mutex<[String]> = .init([])
         await loop.run(stopAfterFirstJob: true, isStopped: { false }, logger: CapturingLogHandler.logger { _, line in
             lines.withLock { $0.append(line) }
         })
         #expect(lines.withLock { $0.first }?.hasPrefix("job 9 report failed") == true)
+    }
+}
+
+/// 喊停這條路的迴圈側行為：哪幾段等待叫得醒、哪幾段刻意叫不醒。
+private final class JobPollingLoopStopTests {
+
+    /// 喊停不會把回寫重送前的那段等待縮短：那一段走的是自己那支等待。
+    ///
+    /// 縮成零的話，喊停當下手上那件 job 會對著仍在故障的站台立刻重送第二次、隨即拋錯，結果就
+    /// 此遺失；退避留著才有復原的窗。此處驗的是「走哪一支」，睡不睡得滿由預設的 `sleep` 決定。
+    @Test
+    func `keeps the resend backoff beyond the reach of a stop`() async throws {
+        let transport: ScriptedPollTransport = .init([
+            .respond(assignedJob), .fail, .respond(.init(statusCode: 200)),
+        ])
+        let signal: StopSignal = .init()
+        let resendWaits: Mutex<[TimeInterval]> = .init([])
+        let loop: JobPollingLoop = .init(
+            client: .init(transport: transport),
+            backend: InMemoryExecutionBackend(),
+            reporter: .init(client: .init(transport: transport), wait: { _ in }),
+            configuration: configuration,
+            wait: { seconds in await signal.wait(seconds) },
+            resendWait: { seconds in resendWaits.withLock { $0.append(seconds) } }
+        )
+        signal.stop()
+        let cycle: JobCycle = try await loop.poll(cursor: nil)
+        #expect(resendWaits.withLock { $0 } == [30])
+        #expect(cycle.disposition == .handled(jobIdentifier: 7, outcome: .completed, delivery: .init(
+            acceptance: .written, traceIsComplete: true, updateAttempts: 1
+        )))
+    }
+
+    /// 退避途中喊停就直接收工：注入 ``StopSignal`` 當等待，喊停會把那段等待叫斷。
+    ///
+    /// 沒有這條路的話，喊停要等退避睡滿才被讀到——服務管理器的收工寬限比那短時，等來的是強殺。
+    @Test
+    func `stops during the backoff when the wait can be woken`() async throws {
+        let transport: ScriptedPollTransport = .init([
+            .respond(.init(statusCode: 204, headers: ["X-GitLab-Last-Update": "cursor-2"])),
+        ])
+        let signal: StopSignal = .init()
+        let loop: JobPollingLoop = .init(
+            client: .init(transport: transport),
+            backend: InMemoryExecutionBackend(),
+            reporter: .init(client: .init(transport: transport), wait: { _ in }),
+            configuration: configuration,
+            wait: { seconds in await signal.wait(seconds) }
+        )
+        let startedAt: Date = .init()
+        async let finished: Void = loop.run(
+            stopAfterFirstJob: false,
+            isStopped: { signal.isStopped },
+            logger: CapturingLogHandler.logger { _, _ in }
+        )
+        // 等第一輪真的敲出去、進到那段三十秒的退避裡，喊停才是在等待途中。
+        while transport.requests.withLock({ $0.isEmpty }) { try await Task.sleep(for: .milliseconds(10)) }
+        try await Task.sleep(for: .milliseconds(50))
+        signal.stop()
+        await finished
+        // 退避是三十秒；叫得醒的話這裡是毫秒級，叫不醒就會撞上這道上限。
+        #expect(Date().timeIntervalSince(startedAt) < 5)
+        let polls: [HTTPRequest] = transport.requests.withLock { $0.filter { $0.url.lastPathComponent == "request" } }
+        #expect(polls.count == 1)
     }
 
     /// 已經被喊停就一次都不敲——停止旗標在每一輪開始前問。
