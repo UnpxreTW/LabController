@@ -7,6 +7,7 @@
 //  SPDX-License-Identifier: Apache-2.0
 
 import Foundation
+import Logging
 
 /// 把「領一件、收不收、跑、回寫」串成一圈的迴圈。
 ///
@@ -230,12 +231,13 @@ public struct JobPollingLoop: Sendable {
     ///   - cursor: 起始游標；預設 nil。
     ///   - stopAfterFirstJob: 經手完一件 job（含拒收）就結束。
     ///   - isStopped: 每一輪開始前問一次要不要停。
-    ///   - log: 一行一件事的紀錄出口；**這條路徑不帶任何 token**。
+    ///   - logger: 一行一件事的紀錄出口；**這條路徑不帶任何 token**。這一層只送出紀錄、不決定
+    ///     它們最後寫去哪裡，後端由組裝行程的那一端裝上。
     public func run(
         startingAt cursor: String? = nil,
         stopAfterFirstJob: Bool,
         isStopped: @Sendable () -> Bool,
-        log: @Sendable (String) -> Void
+        logger: Logger
     ) async {
         var currentCursor: String? = cursor
         while !isStopped() {
@@ -246,7 +248,9 @@ public struct JobPollingLoop: Sendable {
                 // 回寫失敗與領件失敗的下一步相反：這件 job 已經被這台機器經手過，接著去領第二件
                 // 等於在同一台機器上疊工作，`--once` 也會失去「經手一件即收工」的意思。站台端那件
                 // 停在執行中已無從補救（重送在 ``deliver(_:to:of:)`` 裡試過了），至少要留下座標。
-                log("job \(failure.jobIdentifier) report failed: \(GitLabAPIError.safeDescription(of: failure.cause))")
+                logger.error(
+                    "job \(failure.jobIdentifier) report failed: \(GitLabAPIError.safeDescription(of: failure.cause))"
+                )
                 if stopAfterFirstJob { return }
                 await wait(configuration.retryInterval)
                 continue
@@ -255,12 +259,12 @@ public struct JobPollingLoop: Sendable {
                 // 已把站台網址收斂成 scheme／host／port，但傳輸層不是——`URLSession` 連不上時拋的
                 // `URLError` 原樣往上傳，`userInfo` 裡帶著送出去的整條網址，`--host` 的 userinfo 段
                 // 收得下憑證。這條路在站台不在時每個退避週期就走一次。
-                log("poll failed: \(GitLabAPIError.safeDescription(of: error))")
+                logger.error("poll failed: \(GitLabAPIError.safeDescription(of: error))")
                 await wait(configuration.retryInterval)
                 continue
             }
             currentCursor = cycle.cursor
-            log(Self.summary(of: cycle.disposition))
+            logger.info("\(Self.summary(of: cycle.disposition))")
             if stopAfterFirstJob, cycle.didHandleJob { return }
             // 這一輪沒有工作：退開再敲。站台 hold 住時這段等待只是把下一次敲門往後挪一點，
             // 站台沒 hold 時它就是唯一擋住緊迴圈的東西——退避留在迴圈這一層，`poll(cursor:)`

@@ -8,6 +8,7 @@
 
 import Foundation
 import LabControllerKit
+import Logging
 import Synchronization
 import Testing
 
@@ -240,7 +241,7 @@ private final class JobPollingLoopTests {
             configuration: configuration
         )
         let lines: Mutex<[String]> = .init([])
-        await loop.run(stopAfterFirstJob: true, isStopped: { false }, log: { line in
+        await loop.run(stopAfterFirstJob: true, isStopped: { false }, logger: CapturingLogHandler.logger { _, line in
             lines.withLock { $0.append(line) }
         })
         let polls: [HTTPRequest] = transport.requests.withLock { $0.filter { $0.url.lastPathComponent == "request" } }
@@ -263,13 +264,40 @@ private final class JobPollingLoopTests {
             wait: { seconds in waits.withLock { $0.append(seconds) } }
         )
         let lines: Mutex<[String]> = .init([])
-        await loop.run(stopAfterFirstJob: true, isStopped: { false }, log: { line in
+        await loop.run(stopAfterFirstJob: true, isStopped: { false }, logger: CapturingLogHandler.logger { _, line in
             lines.withLock { $0.append(line) }
         })
         #expect(waits.withLock { $0 } == [30])
         #expect(lines.withLock { $0.first }?.hasPrefix("poll failed") == true)
         let polls: [HTTPRequest] = transport.requests.withLock { $0.filter { $0.url.lastPathComponent == "request" } }
         #expect(polls.count == 2)
+    }
+
+    /// 出事的那幾行走 error 等級：紀錄門檻調高時，這一圈唯一還留得住的就該是它們。
+    @Test
+    func `writes failures at the error level and the rest at info`() async throws {
+        let transport: ScriptedPollTransport = .init([
+            .fail, .respond(assignedJob), .respond(.init(statusCode: 200)),
+        ])
+        let loop: JobPollingLoop = .init(
+            client: .init(transport: transport),
+            backend: InMemoryExecutionBackend(),
+            reporter: .init(client: .init(transport: transport), wait: { _ in }),
+            configuration: configuration,
+            wait: { _ in }
+        )
+        let lines: Mutex<[String]> = .init([])
+        let levels: Mutex<[Logger.Level]> = .init([])
+        await loop.run(
+            stopAfterFirstJob: true,
+            isStopped: { false },
+            logger: CapturingLogHandler.logger { level, line in
+                lines.withLock { $0.append(line) }
+                levels.withLock { $0.append(level) }
+            }
+        )
+        #expect(lines.withLock { $0.first }?.hasPrefix("poll failed") == true)
+        #expect(levels.withLock { $0 } == [.error, .info])
     }
 
     /// 這一輪沒有工作也要退開再敲：站台沒把連線 hold 住時，這段等待是唯一擋住緊迴圈的東西。
@@ -289,7 +317,7 @@ private final class JobPollingLoopTests {
             wait: { seconds in waits.withLock { $0.append(seconds) } }
         )
         let lines: Mutex<[String]> = .init([])
-        await loop.run(stopAfterFirstJob: true, isStopped: { false }, log: { line in
+        await loop.run(stopAfterFirstJob: true, isStopped: { false }, logger: CapturingLogHandler.logger { _, line in
             lines.withLock { $0.append(line) }
         })
         #expect(waits.withLock { $0 } == [30])
@@ -312,7 +340,7 @@ private final class JobPollingLoopTests {
             wait: { _ in }
         )
         let lines: Mutex<[String]> = .init([])
-        await loop.run(stopAfterFirstJob: true, isStopped: { false }, log: { line in
+        await loop.run(stopAfterFirstJob: true, isStopped: { false }, logger: CapturingLogHandler.logger { _, line in
             lines.withLock { $0.append(line) }
         })
         let first: String = try #require(lines.withLock { $0.first })
@@ -333,7 +361,7 @@ private final class JobPollingLoopTests {
             wait: { _ in }
         )
         let lines: Mutex<[String]> = .init([])
-        await loop.run(stopAfterFirstJob: true, isStopped: { false }, log: { line in
+        await loop.run(stopAfterFirstJob: true, isStopped: { false }, logger: CapturingLogHandler.logger { _, line in
             lines.withLock { $0.append(line) }
         })
         let first: String = try #require(lines.withLock { $0.first })
@@ -391,7 +419,7 @@ private final class JobPollingLoopTests {
             wait: { _ in }
         )
         let lines: Mutex<[String]> = .init([])
-        await loop.run(stopAfterFirstJob: true, isStopped: { false }, log: { line in
+        await loop.run(stopAfterFirstJob: true, isStopped: { false }, logger: CapturingLogHandler.logger { _, line in
             lines.withLock { $0.append(line) }
         })
         let polls: [HTTPRequest] = transport.requests.withLock { $0.filter { $0.url.lastPathComponent == "request" } }
@@ -411,7 +439,7 @@ private final class JobPollingLoopTests {
             wait: { _ in }
         )
         let lines: Mutex<[String]> = .init([])
-        await loop.run(stopAfterFirstJob: true, isStopped: { false }, log: { line in
+        await loop.run(stopAfterFirstJob: true, isStopped: { false }, logger: CapturingLogHandler.logger { _, line in
             lines.withLock { $0.append(line) }
         })
         #expect(lines.withLock { $0.first }?.hasPrefix("job 9 report failed") == true)
@@ -426,7 +454,7 @@ private final class JobPollingLoopTests {
             backend: InMemoryExecutionBackend(),
             configuration: configuration
         )
-        await loop.run(stopAfterFirstJob: false, isStopped: { true }, log: { _ in })
+        await loop.run(stopAfterFirstJob: false, isStopped: { true }, logger: CapturingLogHandler.logger { _, _ in })
         #expect(transport.requests.withLock { $0.isEmpty })
     }
 }

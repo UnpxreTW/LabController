@@ -19,12 +19,14 @@ let package: Package = .init(
     dependencies: [
         .package(url: "https://github.com/UnpxreTW/SwiftStyleKit.git", exact: "2.1.0"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", exact: "1.8.2"),
+        .package(url: "https://github.com/apple/swift-log.git", exact: "1.15.0"),
     ],
     targets: [
         .target(
             name: "LabControllerKit",
             dependencies: [
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "Logging", package: "swift-log"),
             ],
             plugins: [
                 .plugin(name: "SwiftStyleLint", package: "SwiftStyleKit"),
@@ -35,6 +37,7 @@ let package: Package = .init(
             dependencies: [
                 "LabControllerKit",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "Logging", package: "swift-log"),
             ],
             plugins: [
                 .plugin(name: "SwiftStyleLint", package: "SwiftStyleKit"),
@@ -45,6 +48,7 @@ let package: Package = .init(
             dependencies: [
                 "LabControllerKit",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "Logging", package: "swift-log"),
             ],
             plugins: [
                 .plugin(name: "SwiftStyleLint", package: "SwiftStyleKit"),
