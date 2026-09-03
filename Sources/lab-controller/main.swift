@@ -25,9 +25,13 @@ private let logger: Logger = .init(label: "lab-controller")
 /// 註冊回應揭露的 runner id 與 token 走這裡、與紀錄分流：那三行是要被人複製走的內容，混進帶
 /// 時間戳與標籤的紀錄行裡就不再是可直接取用的形狀。
 ///
+/// 寫入失敗（例如接收端已關閉、broken pipe）時拋出而非中止行程：非拋出版的 `FileHandle.write(_:)`
+/// 會把寫入錯誤轉成無法攔截的 Objective-C 例外、直接讓行程崩潰；改用拋出版讓呼叫端記錄後乾淨結束。
+///
 /// - Parameter line: 要寫出去的內容；換行由這裡補上。
-private func writeStandardOutput(_ line: String) {
-    FileHandle.standardOutput.write(Data((line + "\n").utf8))
+/// - Throws: 寫入失敗時拋出底層檔案錯誤。
+private func writeStandardOutput(_ line: String) throws {
+    try FileHandle.standardOutput.write(contentsOf: Data((line + "\n").utf8))
 }
 
 // SIGTERM／SIGINT：先關掉預設處置，改由 DispatchSource 轉成呼叫端給的停止動作。
@@ -71,9 +75,14 @@ if let register: RegisterCommand = parsedCommand as? RegisterCommand {
     }
     // 認證 token 僅於註冊回應揭露一次（one-shot reveal）；先印出再驗證，
     // 驗證失敗才不會讓 token 隨行程結束流失、留下拿不回 token 的孤兒 runner。
-    writeStandardOutput("registered runner id=\(runner.id)")
-    writeStandardOutput("authentication token follows on the next line")
-    writeStandardOutput(runner.token)
+    do {
+        try writeStandardOutput("registered runner id=\(runner.id)")
+        try writeStandardOutput("authentication token follows on the next line")
+        try writeStandardOutput(runner.token)
+    } catch {
+        logger.error("failed to write registration output: \(GitLabAPIError.safeDescription(of: error))")
+        exit(1)
+    }
     do {
         try await client.verify(host: register.host, token: runner.token)
     } catch {
