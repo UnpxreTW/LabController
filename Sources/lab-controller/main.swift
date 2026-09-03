@@ -10,7 +10,25 @@ import ArgumentParser
 import Dispatch
 import Foundation
 import LabControllerKit
+import Logging
 import Synchronization
+
+// 紀錄一律走 stderr、且逐行送出：以檔案承接輸出時，stdout 是整塊緩衝的，行程被強制收工時
+// 那一塊從來沒有機會寫出去，檔案於是恆為空。後端只在這裡裝一次，函式庫那一層只拿 `Logger`。
+LoggingSystem.bootstrap { label in StreamLogHandler.standardError(label: label) }
+
+/// 這個行程的紀錄出口；子命令共用同一個標籤。
+private let logger: Logger = .init(label: "lab-controller")
+
+/// 把一行給操作者看的資料寫進 stdout。
+///
+/// 註冊回應揭露的 runner id 與 token 走這裡、與紀錄分流：那三行是要被人複製走的內容，混進帶
+/// 時間戳與標籤的紀錄行裡就不再是可直接取用的形狀。
+///
+/// - Parameter line: 要寫出去的內容；換行由這裡補上。
+private func writeStandardOutput(_ line: String) {
+    FileHandle.standardOutput.write(Data((line + "\n").utf8))
+}
 
 // SIGTERM／SIGINT：先關掉預設處置，改由 DispatchSource 轉成呼叫端給的停止動作。
 // 回傳的 source 必須由呼叫端持有到行程結束，放掉即失去訊號處理。
@@ -48,21 +66,21 @@ if let register: RegisterCommand = parsedCommand as? RegisterCommand {
             description: register.description
         )
     } catch {
-        FileHandle.standardError.write(Data("lab-controller: register failed: \(error)\n".utf8))
+        logger.error("register failed: \(GitLabAPIError.safeDescription(of: error))")
         exit(1)
     }
     // 認證 token 僅於註冊回應揭露一次（one-shot reveal）；先印出再驗證，
     // 驗證失敗才不會讓 token 隨行程結束流失、留下拿不回 token 的孤兒 runner。
-    print("lab-controller: registered runner id=\(runner.id)")
-    print("lab-controller: authentication token follows on the next line")
-    print(runner.token)
+    writeStandardOutput("registered runner id=\(runner.id)")
+    writeStandardOutput("authentication token follows on the next line")
+    writeStandardOutput(runner.token)
     do {
         try await client.verify(host: register.host, token: runner.token)
     } catch {
-        FileHandle.standardError.write(Data("lab-controller: token verification failed: \(error)\n".utf8))
+        logger.error("token verification failed: \(GitLabAPIError.safeDescription(of: error))")
         exit(1)
     }
-    print("lab-controller: token verified")
+    logger.info("token verified")
     exit(0)
 }
 
@@ -72,7 +90,7 @@ if let run: RunCommand = parsedCommand as? RunCommand {
     do {
         runnerToken = try RunnerTokenFile.read(atPath: run.tokenFile)
     } catch {
-        FileHandle.standardError.write(Data("lab-controller: token file unusable: \(error)\n".utf8))
+        logger.error("token file unusable: \(GitLabAPIError.safeDescription(of: error))")
         exit(1)
     }
     let backend: NymphExecutionBackend = .init(
@@ -93,14 +111,14 @@ if let run: RunCommand = parsedCommand as? RunCommand {
     // 站台位址只印 scheme／host／port：`--host` 收得下 `https://oauth2:<token>@…` 這種形狀，
     // 原樣印出等於把憑證寫進行程的第一行 stdout。
     let safeHost: String = GitLabAPIError.safeLocation(of: run.host)
-    print("lab-controller: polling \(safeHost) guest=\(run.os.rawValue) image=\(run.golden)")
+    logger.info("polling \(safeHost) guest=\(run.os.rawValue) image=\(run.golden)")
     await loop.run(
         stopAfterFirstJob: run.once,
         isStopped: { stopSignal.isStopped },
-        log: { print("lab-controller: \($0)") }
+        logger: logger
     )
     withExtendedLifetime(sources) {}
-    print("lab-controller: stopped")
+    logger.info("stopped")
     exit(0)
 }
 
@@ -116,7 +134,7 @@ guard let command: LabControllerCommand = parsedCommand as? LabControllerCommand
 }
 let configuration: Config = command.resolvedConfig
 
-print("lab-controller: config version=\(configuration.version) intervalSeconds=\(configuration.poll.intervalSeconds)")
+logger.info("config version=\(configuration.version) intervalSeconds=\(configuration.poll.intervalSeconds)")
 
 // 停止旗標：訊號處理器設為 true，心跳迴圈據此結束。
 let stopRequested: Atomic<Bool> = .init(false)
@@ -124,7 +142,7 @@ let stopRequested: Atomic<Bool> = .init(false)
 // 空週期心跳：每個週期印一行、迴圈內不做其他事。
 let heartbeat: Task<Void, Never> = Task {
     while !stopRequested.load(ordering: .relaxed) {
-        print("lab-controller: tick")
+        logger.info("tick")
         // 取消會讓 sleep 立即拋錯、免等滿一個週期才反應停止訊號。
         do {
             try await Task.sleep(for: .seconds(configuration.poll.intervalSeconds))
@@ -142,5 +160,5 @@ let signalSources: [any DispatchSourceSignal] = installStopHandlers {
 
 await heartbeat.value
 withExtendedLifetime(signalSources) {}
-print("lab-controller: stopped")
+logger.info("stopped")
 exit(0)
