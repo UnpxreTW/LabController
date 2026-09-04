@@ -30,5 +30,8 @@ public struct RegisterCommand: ParsableCommand {
     @Option(help: "Optional description shown in the GitLab runner list.")
     public var description: String?
 
+    /// 紀錄門檻（`--log-level`；未給時看 `LOG_LEVEL`）。
+    @OptionGroup public var logging: LoggingOptions
+
     public init() {}
 }
