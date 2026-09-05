@@ -28,6 +28,9 @@ public struct LabControllerCommand: ParsableCommand {
     @Option(help: "Seconds between heartbeat ticks.")
     public var pollInterval: Int = Config.default.poll.intervalSeconds
 
+    /// 紀錄門檻（`--log-level`；未給時看 `LOG_LEVEL`）。
+    @OptionGroup public var logging: LoggingOptions
+
     public init() {}
 
     /// 由已解析的旗標值組出 `Config`。
