@@ -62,6 +62,9 @@ public struct RunCommand: ParsableCommand {
     @Flag(help: "Exit after one job has been handled instead of polling forever.")
     public var once: Bool = false
 
+    /// 紀錄門檻（`--log-level`；未給時看 `LOG_LEVEL`）。
+    @OptionGroup public var logging: LoggingOptions
+
     public init() {}
 
     /// 由已解析的旗標值組出開 guest 用的參數。

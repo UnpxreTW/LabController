@@ -15,10 +15,28 @@ import Synchronization
 
 // 紀錄一律走 stderr、且逐行送出：以檔案承接輸出時，stdout 是整塊緩衝的，行程被強制收工時
 // 那一塊從來沒有機會寫出去，檔案於是恆為空。後端只在這裡裝一次，函式庫那一層只拿 `Logger`。
-LoggingSystem.bootstrap { label in StreamLogHandler.standardError(label: label) }
+// 門檻另外經一層 `LogLevelGate`：後端只能裝一次、且要在第一行紀錄送出之前，而門檻要等引數
+// 解析完才知道，兩件事的時序拆不到同一刻。下游那份門檻開到底，過濾一律由 gate 做、免得兩層
+// 各擋各的。
+LoggingSystem.bootstrap { label in
+    var stream: StreamLogHandler = .standardError(label: label)
+    stream.logLevel = .trace
+    return LogLevelGate(downstream: stream)
+}
 
 /// 這個行程的紀錄出口；子命令共用同一個標籤。
 private let logger: Logger = .init(label: "lab-controller")
+
+/// 把子命令收到的 `--log-level`（或 `LOG_LEVEL`）套進這個行程的紀錄門檻。
+///
+/// 套用擺在解析之後的分派點、不擺在 `validate()`：解析本身於是不動任何行程狀態。
+///
+/// - Parameter options: 該子命令解析出來的紀錄選項。
+private func applyLogLevel(_ options: LoggingOptions) {
+    if let warning: String = options.apply() {
+        logger.warning("\(warning)")
+    }
+}
 
 /// 把一行給操作者看的資料寫進 stdout。
 ///
@@ -61,6 +79,7 @@ do {
 
 // `register` 子命令：一次性動作、完成即結束行程，不進心跳迴圈。
 if let register: RegisterCommand = parsedCommand as? RegisterCommand {
+    applyLogLevel(register.logging)
     let client: RunnerRegistrationClient = .init()
     let runner: RegisteredRunner
     do {
@@ -95,6 +114,7 @@ if let register: RegisterCommand = parsedCommand as? RegisterCommand {
 
 // `run` 子命令：領件迴圈，跑到收到停止訊號（或 `--once` 經手完一件）為止。
 if let run: RunCommand = parsedCommand as? RunCommand {
+    applyLogLevel(run.logging)
     let runnerToken: String
     do {
         runnerToken = try RunnerTokenFile.read(atPath: run.tokenFile)
@@ -141,6 +161,7 @@ guard let command: LabControllerCommand = parsedCommand as? LabControllerCommand
         LabControllerCommand.exit(withError: error)
     }
 }
+applyLogLevel(command.logging)
 let configuration: Config = command.resolvedConfig
 
 logger.info("config version=\(configuration.version) intervalSeconds=\(configuration.poll.intervalSeconds)")
