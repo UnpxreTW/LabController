@@ -440,7 +440,7 @@ public struct RunnerInfo: Encodable, Sendable, Equatable {
     /// runner 實作名稱。
     public var name: String
 
-    /// runner 版本。
+    /// runner 版本；預設為建置時由 git 標籤推導的值。
     public var version: String
 
     /// 執行器種類。
@@ -452,7 +452,7 @@ public struct RunnerInfo: Encodable, Sendable, Equatable {
     /// 以顯式欄位建立。
     public init(
         name: String = "lab-controller",
-        version: String = "0.1.0",
+        version: String = LabControllerVersion.current,
         executor: String = "custom",
         features: RunnerFeatures = .init()
     ) {
