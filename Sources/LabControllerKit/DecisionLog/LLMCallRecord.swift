@@ -12,9 +12,9 @@
 /// 服務成果歸類。另兩個截斷偵測用的計數（``promptEvalCount``／``evalCount``）是呼叫端量得到
 /// 才有的值，做成 optional：現在多兩個 optional 欄位，比日後為它們升 schema 版本便宜。
 ///
-/// ⚠ **這裡不放任何秘密**：模型名、用途、計數都不是憑證。job token 與 masked 變數的遮蔽發生
-/// 在上游 trace 層（``TraceMasker``），這個型別結構上就沒有能裝下秘密的欄位——不是靠呼叫端
-/// 記得別塞。
+/// - Important: **這裡不放任何秘密**：模型名、用途、計數都不是憑證。job token 與 masked 變數的
+///   遮蔽發生在上游 trace 層（``TraceMasker``），這個型別結構上就沒有能裝下秘密的欄位——不是靠
+///   呼叫端記得別塞。
 public struct LLMCallRecord: Sendable, Equatable, Codable {
 
     /// 呼叫的模型識別（如 `gpt-120b`）。
