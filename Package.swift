@@ -22,6 +22,7 @@ let package: Package = .init(
         .package(url: "https://github.com/apple/swift-log.git", exact: "1.15.0"),
     ],
     targets: [
+        .plugin(name: "GenerateVersion", capability: .buildTool()),
         .target(
             name: "LabControllerKit",
             dependencies: [
@@ -29,6 +30,7 @@ let package: Package = .init(
                 .product(name: "Logging", package: "swift-log"),
             ],
             plugins: [
+                .plugin(name: "GenerateVersion"),
                 .plugin(name: "SwiftStyleLint", package: "SwiftStyleKit"),
             ]
         ),
