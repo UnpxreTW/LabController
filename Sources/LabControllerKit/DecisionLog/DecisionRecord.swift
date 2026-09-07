@@ -44,8 +44,8 @@ public struct DecisionRecord: Sendable, Equatable, Codable {
 
     /// 判定當下讀到的原始佐證值；只供事後查證，不參與任何判斷。
     ///
-    /// ⚠ 這裡承接 ``DetectedEvent/inputs``——偵測端不得把憑證或 masked 變數放進佐證，遮蔽是
-    /// 上游的責任；此欄不做二次遮蔽。
+    /// - Warning: 這裡承接 ``DetectedEvent/inputs``——偵測端不得把憑證或 masked 變數放進佐證，
+    ///   遮蔽是上游的責任；此欄不做二次遮蔽。
     public let inputs: [String: String]
 
     /// 以顯式欄位建立。

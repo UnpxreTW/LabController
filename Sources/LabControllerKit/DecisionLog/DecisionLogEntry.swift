@@ -62,8 +62,9 @@ public enum DecisionLogEntry: Sendable, Equatable {
     /// 不宜做成共享 static，且日誌不是熱路徑，重建成本可忽略。
     ///
     /// `sortedKeys` 讓同一則紀錄每次編出逐 byte 相同的字串（測試可釘、diff 乾淨）；
-    /// `iso8601` 讓時刻是人可讀的字串——⚠ 它**不含小數秒**，同一秒內的兩則紀錄時刻會相同，
-    /// 先後仍靠 NDJSON 的行序保留，決策輪為秒級、這個精度足夠。
+    /// `iso8601` 讓時刻是人可讀的字串；先後仍靠 NDJSON 的行序保留，決策輪為秒級、這個精度足夠。
+    ///
+    /// - Warning: `iso8601` **不含小數秒**，同一秒內的兩則紀錄時刻會相同。
     private static func makeEncoder() -> JSONEncoder {
         let encoder: JSONEncoder = .init()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]

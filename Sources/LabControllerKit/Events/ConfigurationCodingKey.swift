@@ -36,11 +36,11 @@ struct ConfigurationCodingKey: CodingKey {
     /// 而且沒有任何一處會提。站台回應走的是另一套（未知欄位屬正常演進、刻意忽略），兩者
     /// 的取捨方向相反，別互相套用。
     ///
-    /// ⚠ 擋不到**同名欄位重複出現**（`{"seconds": 300, "seconds": 900}`）：解碼層看到的
-    /// 已經是去重後的結果，後出現的那個在更早的階段就消失了。
+    /// - Warning: 擋不到**同名欄位重複出現**（`{"seconds": 300, "seconds": 900}`）：解碼層
+    ///   看到的已經是去重後的結果，後出現的那個在更早的階段就消失了。
     ///
-    /// ⚠ 實作上會對同一個 `Decoder` 再要一次 keyed container；標準庫的 JSON 與 plist
-    /// decoder 都允許，但這不是 `Decoder` 協定明文保證的行為。
+    /// - Important: 實作上會對同一個 `Decoder` 再要一次 keyed container；標準庫的 JSON 與 plist
+    ///   decoder 都允許，但這不是 `Decoder` 協定明文保證的行為。
     static func assertNoUnknownKeys(in decoder: any Decoder, known: Set<String>) throws {
         let container: KeyedDecodingContainer<ConfigurationCodingKey> = try decoder.container(
             keyedBy: ConfigurationCodingKey.self
