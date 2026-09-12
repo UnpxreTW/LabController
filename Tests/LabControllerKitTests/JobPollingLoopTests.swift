@@ -12,6 +12,8 @@ import Logging
 import Synchronization
 import Testing
 
+// MARK: - TransportOutage
+
 /// 站台此刻連不上；只用來排「這一次領不到」的那一步。
 private struct TransportOutage: Error {}
 
@@ -22,9 +24,11 @@ private let credentialBearingURL: String = "https://oauth2:glpat-synthetic@gitla
 ///
 /// 假傳輸原本只拋合成型別 ``TransportOutage``，永遠碰不到這條真路徑，遮蔽漏了也測不出來。
 private let credentialBearingTransportError: URLError = {
-    guard let url: URL = .init(string: credentialBearingURL) else { preconditionFailure("合成網址字面值應解得開") }
-    return .init(.cannotConnectToHost, userInfo: [NSURLErrorFailingURLErrorKey: url])
+	guard let url: URL = .init(string: credentialBearingURL) else { preconditionFailure("合成網址字面值應解得開") }
+	return .init(.cannotConnectToHost, userInfo: [NSURLErrorFailingURLErrorKey: url])
 }()
+
+// MARK: - ScriptedPollTransport
 
 /// 依序播放的假傳輸，序列裡可以排連不上的那一次。
 ///
@@ -32,502 +36,509 @@ private let credentialBearingTransportError: URLError = {
 /// 停止條件決定，回應不必預先數好準備幾份。
 private final class ScriptedPollTransport: HTTPTransport, Sendable {
 
-    /// 一次呼叫要發生什麼。
-    enum Step: Sendable {
+	/// 以步驟序列建立。
+	///
+	/// - Parameter steps: 依序播放的步驟。
+	init(_ steps: [Step]) {
+		self.steps = .init(steps)
+	}
 
-        /// 回這個回應。
-        case respond(HTTPResponse)
+	/// 一次呼叫要發生什麼。
+	enum Step {
 
-        /// 這一次連不上。
-        case fail
+		/// 回這個回應。
+		case respond(HTTPResponse)
 
-        /// 這一次連不上，且拋的是把網址帶在身上的真 `URLError`。
-        case failWithCredentialBearingURL
-    }
+		/// 這一次連不上。
+		case fail
 
-    /// 收到的請求，依序累積。
-    let requests: Mutex<[HTTPRequest]> = .init([])
+		/// 這一次連不上，且拋的是把網址帶在身上的真 `URLError`。
+		case failWithCredentialBearingURL
+	}
 
-    /// 待播放的步驟序列。
-    private let steps: Mutex<[Step]>
+	/// 收到的請求，依序累積。
+	let requests: Mutex<[HTTPRequest]> = .init([])
 
-    /// 以步驟序列建立。
-    ///
-    /// - Parameter steps: 依序播放的步驟。
-    init(_ steps: [Step]) {
-        self.steps = .init(steps)
-    }
+	/// 記錄請求，播放序列中的下一步。
+	///
+	/// - Parameter request: 送出的請求。
+	/// - Returns: 這一步排定的回應。
+	/// - Throws: 這一步排的是連不上時拋 ``TransportOutage``，排的是帶網址那形時拋 `URLError`。
+	func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+		requests.withLock { $0.append(request) }
+		let step: Step = steps.withLock { queue in
+			queue.count > 1 ? queue.removeFirst() : (queue.first ?? .fail)
+		}
+		switch step {
+		case let .respond(response): return response
+		case .fail: throw TransportOutage()
+		case .failWithCredentialBearingURL: throw credentialBearingTransportError
+		}
+	}
 
-    /// 記錄請求，播放序列中的下一步。
-    ///
-    /// - Parameter request: 送出的請求。
-    /// - Returns: 這一步排定的回應。
-    /// - Throws: 這一步排的是連不上時拋 ``TransportOutage``，排的是帶網址那形時拋 `URLError`。
-    func send(_ request: HTTPRequest) async throws -> HTTPResponse {
-        requests.withLock { $0.append(request) }
-        let step: Step = steps.withLock { queue in
-            queue.count > 1 ? queue.removeFirst() : (queue.first ?? .fail)
-        }
-        switch step {
-        case let .respond(response): return response
-        case .fail: throw TransportOutage()
-        case .failWithCredentialBearingURL: throw credentialBearingTransportError
-        }
-    }
+	/// 待播放的步驟序列。
+	private let steps: Mutex<[Step]>
+
 }
 
 /// 從請求本體解出 JSON 物件；解不出即測試失敗。
 private func requestBody(of request: HTTPRequest) throws -> [String: Any] {
-    let data: Data = try #require(request.body)
-    return try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+	let data: Data = try #require(request.body)
+	return try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
 }
 
 /// 站台指派一件 job 的回應；全為合成值。
 private let assignedJob: HTTPResponse = .init(
-    statusCode: 201,
-    body: .init(#"""
-    {"id":7,"token":"synthetic-job-token",
-     "steps":[{"name":"script","script":["swift build"],"allow_failure":false}],
-     "git_info":{"repo_url":"https://example.invalid/g/a.git","ref":"main","sha":"deadbeef"}}
-    """#.utf8)
+	statusCode: 201,
+	body: .init(#"""
+		{"id":7,"token":"synthetic-job-token",
+		 "steps":[{"name":"script","script":["swift build"],"allow_failure":false}],
+		 "git_info":{"repo_url":"https://example.invalid/g/a.git","ref":"main","sha":"deadbeef"}}
+		"""#.utf8)
 )
 
 /// 站台指派一件本 executor 收不下的 job（宣告要在容器裡跑）。
 private let containerJob: HTTPResponse = .init(
-    statusCode: 201,
-    body: .init(#"""
-    {"id":9,"token":"synthetic-job-token","image":{"name":"ruby:3.2"},
-     "steps":[{"name":"script","script":["ruby -v"],"allow_failure":false}]}
-    """#.utf8)
+	statusCode: 201,
+	body: .init(#"""
+		{"id":9,"token":"synthetic-job-token","image":{"name":"ruby:3.2"},
+		 "steps":[{"name":"script","script":["ruby -v"],"allow_failure":false}]}
+		"""#.utf8)
 )
 
 /// 測試共用的迴圈設定；站台位址與 token 皆為合成值。
 private let configuration: JobPollingLoop.Configuration = .init(
-    host: "https://gitlab.example.invalid",
-    runnerToken: "synthetic-runner-token",
-    image: .alias("golden-xcode")
+	host: "https://gitlab.example.invalid",
+	runnerToken: "synthetic-runner-token",
+	image: .alias("golden-xcode")
 )
+
+// MARK: - JobPollingLoopTests
 
 private final class JobPollingLoopTests {
 
-    /// 領到就跑完、回寫，處置帶著 job 識別碼與結果類別。
-    @Test
-    func `runs an assigned job and reports the outcome`() async throws {
-        let transport: ScriptedPollTransport = .init([.respond(assignedJob), .respond(.init(statusCode: 200))])
-        let loop: JobPollingLoop = .init(
-            client: .init(transport: transport),
-            backend: InMemoryExecutionBackend(),
-            reporter: .init(client: .init(transport: transport), wait: { _ in }),
-            configuration: configuration
-        )
-        let cycle: JobCycle = try await loop.poll(cursor: nil)
-        #expect(cycle.disposition == .handled(jobIdentifier: 7, outcome: .completed, delivery: .init(
-            acceptance: .written, traceIsComplete: true, updateAttempts: 1
-        )))
-        #expect(cycle.didHandleJob)
-    }
+	/// 領到就跑完、回寫，處置帶著 job 識別碼與結果類別。
+	@Test
+	private func `runs an assigned job and reports the outcome`() async throws {
+		let transport: ScriptedPollTransport = .init([.respond(assignedJob), .respond(.init(statusCode: 200))])
+		let loop: JobPollingLoop = .init(
+			client: .init(transport: transport),
+			backend: InMemoryExecutionBackend(),
+			reporter: .init(client: .init(transport: transport), wait: { _ in }),
+			configuration: configuration
+		)
+		let cycle: JobCycle = try await loop.poll(cursor: nil)
+		#expect(cycle.disposition == .handled(jobIdentifier: 7, outcome: .completed, delivery: .init(
+			acceptance: .written, traceIsComplete: true, updateAttempts: 1
+		)))
+		#expect(cycle.didHandleJob)
+	}
 
-    /// 兩把 token 各走各的：領件帶 runner 認證 token、回寫一律帶站台隨該件 job 發的專屬 token。
-    @Test
-    func `keeps the runner token out of the reporting path`() async throws {
-        let transport: ScriptedPollTransport = .init([.respond(assignedJob), .respond(.init(statusCode: 200))])
-        let loop: JobPollingLoop = .init(
-            client: .init(transport: transport),
-            backend: InMemoryExecutionBackend(),
-            reporter: .init(client: .init(transport: transport), wait: { _ in }),
-            configuration: configuration
-        )
-        _ = try await loop.poll(cursor: nil)
-        let requests: [HTTPRequest] = transport.requests.withLock { $0 }
-        #expect(try requestBody(of: requests[0])["token"] as? String == "synthetic-runner-token")
-        let trace: HTTPRequest = try #require(requests.first { $0.method == "PATCH" })
-        #expect(trace.headers["JOB-TOKEN"] == "synthetic-job-token")
-        let update: HTTPRequest = try #require(requests.last)
-        #expect(update.method == "PUT")
-        #expect(try requestBody(of: update)["token"] as? String == "synthetic-job-token")
-        // 領件之後的每一個請求，不論標頭或本體，都不該再出現 runner 認證 token。
-        let leaked: Bool = requests.dropFirst().contains { request in
-            let body: String = request.body.map { String(decoding: $0, as: UTF8.self) } ?? ""
-            return body.contains("synthetic-runner-token")
-                || request.headers.values.contains("synthetic-runner-token")
-        }
-        #expect(!leaked)
-    }
+	/// 兩把 token 各走各的：領件帶 runner 認證 token、回寫一律帶站台隨該件 job 發的專屬 token。
+	@Test
+	private func `keeps the runner token out of the reporting path`() async throws {
+		let transport: ScriptedPollTransport = .init([.respond(assignedJob), .respond(.init(statusCode: 200))])
+		let loop: JobPollingLoop = .init(
+			client: .init(transport: transport),
+			backend: InMemoryExecutionBackend(),
+			reporter: .init(client: .init(transport: transport), wait: { _ in }),
+			configuration: configuration
+		)
+		_ = try await loop.poll(cursor: nil)
+		let requests: [HTTPRequest] = transport.requests.withLock { $0 }
+		#expect(try requestBody(of: requests[0])["token"] as? String == "synthetic-runner-token")
+		let trace: HTTPRequest = try #require(requests.first { $0.method == "PATCH" })
+		#expect(trace.headers["JOB-TOKEN"] == "synthetic-job-token")
+		let update: HTTPRequest = try #require(requests.last)
+		#expect(update.method == "PUT")
+		#expect(try requestBody(of: update)["token"] as? String == "synthetic-job-token")
+		// 領件之後的每一個請求，不論標頭或本體，都不該再出現 runner 認證 token。
+		let leaked: Bool = requests.dropFirst().contains { request in
+			let body: String = request.body.map { String(decoding: $0, as: UTF8.self) } ?? ""
+			return body.contains("synthetic-runner-token")
+				|| request.headers.values.contains("synthetic-runner-token")
+		}
+		#expect(!leaked)
+	}
 
-    /// 領件時要把 refspec 能力宣告出去：不宣告，合併請求那類 pipeline 的 job 一領走就被判死。
-    @Test
-    func `declares the refspec capability when asking for work`() async throws {
-        let transport: ScriptedPollTransport = .init([.respond(.init(statusCode: 204))])
-        let loop: JobPollingLoop = .init(
-            client: .init(transport: transport),
-            backend: InMemoryExecutionBackend(),
-            reporter: .init(client: .init(transport: transport), wait: { _ in }),
-            configuration: configuration
-        )
-        _ = try await loop.poll(cursor: nil)
-        let requests: [HTTPRequest] = transport.requests.withLock { $0 }
-        let info: [String: Any] = try #require(try requestBody(of: requests[0])["info"] as? [String: Any])
-        let features: [String: Any] = try #require(info["features"] as? [String: Any])
-        #expect(features["refspecs"] as? Bool == true)
-    }
+	/// 領件時要把 refspec 能力宣告出去：不宣告，合併請求那類 pipeline 的 job 一領走就被判死。
+	@Test
+	private func `declares the refspec capability when asking for work`() async throws {
+		let transport: ScriptedPollTransport = .init([.respond(.init(statusCode: 204))])
+		let loop: JobPollingLoop = .init(
+			client: .init(transport: transport),
+			backend: InMemoryExecutionBackend(),
+			reporter: .init(client: .init(transport: transport), wait: { _ in }),
+			configuration: configuration
+		)
+		_ = try await loop.poll(cursor: nil)
+		let requests: [HTTPRequest] = transport.requests.withLock { $0 }
+		let info: [String: Any] = try #require(try requestBody(of: requests[0])["info"] as? [String: Any])
+		let features: [String: Any] = try #require(info["features"] as? [String: Any])
+		#expect(features["refspecs"] as? Bool == true)
+	}
 
-    /// 沒領到也要把游標帶回來——long-poll 的 hold 就是靠它，漏帶等於每一輪都白等。
-    @Test
-    func `carries the cursor forward when no job is available`() async throws {
-        let transport: ScriptedPollTransport = .init([
-            .respond(.init(statusCode: 204, headers: ["X-GitLab-Last-Update": "cursor-2"])),
-        ])
-        let loop: JobPollingLoop = .init(
-            client: .init(transport: transport),
-            backend: InMemoryExecutionBackend(),
-            configuration: configuration
-        )
-        let cycle: JobCycle = try await loop.poll(cursor: "cursor-1")
-        #expect(cycle.disposition == .idle)
-        #expect(cycle.cursor == "cursor-2")
-        #expect(!cycle.didHandleJob)
-        let poll: HTTPRequest = try #require(transport.requests.withLock { $0.first })
-        #expect(try requestBody(of: poll)["last_update"] as? String == "cursor-1")
-    }
+	/// 沒領到也要把游標帶回來——long-poll 的 hold 就是靠它，漏帶等於每一輪都白等。
+	@Test
+	private func `carries the cursor forward when no job is available`() async throws {
+		let transport: ScriptedPollTransport = .init([
+			.respond(.init(statusCode: 204, headers: ["X-GitLab-Last-Update": "cursor-2"]))
+		])
+		let loop: JobPollingLoop = .init(
+			client: .init(transport: transport),
+			backend: InMemoryExecutionBackend(),
+			configuration: configuration
+		)
+		let cycle: JobCycle = try await loop.poll(cursor: "cursor-1")
+		#expect(cycle.disposition == .idle)
+		#expect(cycle.cursor == "cursor-2")
+		#expect(!cycle.didHandleJob)
+		let poll: HTTPRequest = try #require(transport.requests.withLock { $0.first })
+		#expect(try requestBody(of: poll)["last_update"] as? String == "cursor-1")
+	}
 
-    /// 收不下的 payload 當面拒收：站台端收到的是「程式錯、不重試」，且拒收理由已寫進 trace。
-    @Test
-    func `refuses a job it cannot digest and writes the reason back`() async throws {
-        let transport: ScriptedPollTransport = .init([.respond(containerJob), .respond(.init(statusCode: 200))])
-        let loop: JobPollingLoop = .init(
-            client: .init(transport: transport),
-            backend: InMemoryExecutionBackend(),
-            reporter: .init(client: .init(transport: transport), wait: { _ in }),
-            configuration: configuration
-        )
-        let cycle: JobCycle = try await loop.poll(cursor: nil)
-        #expect(cycle.disposition == .refused(jobIdentifier: 9, delivery: .init(
-            acceptance: .written, traceIsComplete: true, updateAttempts: 1
-        )))
-        let requests: [HTTPRequest] = transport.requests.withLock { $0 }
-        let trace: HTTPRequest = try #require(requests.first { $0.method == "PATCH" })
-        let traceBody: Data = try #require(trace.body)
-        #expect(String(decoding: traceBody, as: UTF8.self).contains("ruby:3.2"))
-        let last: HTTPRequest = try #require(requests.last)
-        let update: [String: Any] = try requestBody(of: last)
-        #expect(update["state"] as? String == "failed")
-        #expect(update["failure_reason"] as? String == "script_failure")
-    }
+	/// 收不下的 payload 當面拒收：站台端收到的是「程式錯、不重試」，且拒收理由已寫進 trace。
+	@Test
+	private func `refuses a job it cannot digest and writes the reason back`() async throws {
+		let transport: ScriptedPollTransport = .init([.respond(containerJob), .respond(.init(statusCode: 200))])
+		let loop: JobPollingLoop = .init(
+			client: .init(transport: transport),
+			backend: InMemoryExecutionBackend(),
+			reporter: .init(client: .init(transport: transport), wait: { _ in }),
+			configuration: configuration
+		)
+		let cycle: JobCycle = try await loop.poll(cursor: nil)
+		#expect(cycle.disposition == .refused(jobIdentifier: 9, delivery: .init(
+			acceptance: .written, traceIsComplete: true, updateAttempts: 1
+		)))
+		let requests: [HTTPRequest] = transport.requests.withLock { $0 }
+		let trace: HTTPRequest = try #require(requests.first { $0.method == "PATCH" })
+		let traceBody: Data = try #require(trace.body)
+		#expect(String(decoding: traceBody, as: UTF8.self).contains("ruby:3.2"))
+		let last: HTTPRequest = try #require(requests.last)
+		let update: [String: Any] = try requestBody(of: last)
+		#expect(update["state"] as? String == "failed")
+		#expect(update["failure_reason"] as? String == "script_failure")
+	}
 
-    /// 拒收沒開過任何執行環境——擋在執行之前才省得下那一格。
-    @Test
-    func `spawns nothing for a refused job`() async throws {
-        let backend: InMemoryExecutionBackend = .init()
-        let transport: ScriptedPollTransport = .init([.respond(containerJob), .respond(.init(statusCode: 200))])
-        let loop: JobPollingLoop = .init(
-            client: .init(transport: transport),
-            backend: backend,
-            reporter: .init(client: .init(transport: transport), wait: { _ in }),
-            configuration: configuration
-        )
-        _ = try await loop.poll(cursor: nil)
-        #expect(backend.destroyCount == 0)
-        #expect(try await backend.ps().isEmpty)
-    }
+	/// 拒收沒開過任何執行環境——擋在執行之前才省得下那一格。
+	@Test
+	private func `spawns nothing for a refused job`() async throws {
+		let backend: InMemoryExecutionBackend = .init()
+		let transport: ScriptedPollTransport = .init([.respond(containerJob), .respond(.init(statusCode: 200))])
+		let loop: JobPollingLoop = .init(
+			client: .init(transport: transport),
+			backend: backend,
+			reporter: .init(client: .init(transport: transport), wait: { _ in }),
+			configuration: configuration
+		)
+		_ = try await loop.poll(cursor: nil)
+		#expect(backend.destroyCount == 0)
+		#expect(try await backend.ps().isEmpty)
+	}
 
-    /// `--once`：經手完一件就收工，不再敲下一輪。
-    @Test
-    func `stops after the first handled job when asked to`() async throws {
-        let transport: ScriptedPollTransport = .init([.respond(assignedJob), .respond(.init(statusCode: 200))])
-        let loop: JobPollingLoop = .init(
-            client: .init(transport: transport),
-            backend: InMemoryExecutionBackend(),
-            reporter: .init(client: .init(transport: transport), wait: { _ in }),
-            configuration: configuration
-        )
-        let lines: Mutex<[String]> = .init([])
-        await loop.run(stopAfterFirstJob: true, isStopped: { false }, logger: CapturingLogHandler.logger { _, line in
-            lines.withLock { $0.append(line) }
-        })
-        let polls: [HTTPRequest] = transport.requests.withLock { $0.filter { $0.url.lastPathComponent == "request" } }
-        #expect(polls.count == 1)
-        #expect(lines.withLock { $0 }.count == 1)
-    }
+	/// `--once`：經手完一件就收工，不再敲下一輪。
+	@Test
+	private func `stops after the first handled job when asked to`() async {
+		let transport: ScriptedPollTransport = .init([.respond(assignedJob), .respond(.init(statusCode: 200))])
+		let loop: JobPollingLoop = .init(
+			client: .init(transport: transport),
+			backend: InMemoryExecutionBackend(),
+			reporter: .init(client: .init(transport: transport), wait: { _ in }),
+			configuration: configuration
+		)
+		let lines: Mutex<[String]> = .init([])
+		await loop.run(stopAfterFirstJob: true, isStopped: { false }, logger: CapturingLogHandler.logger { _, line in
+			lines.withLock { $0.append(line) }
+		})
+		let polls: [HTTPRequest] = transport.requests.withLock { $0.filter { $0.url.lastPathComponent == "request" } }
+		#expect(polls.count == 1)
+		#expect(lines.withLock { $0 }.count == 1)
+	}
 
-    /// 領件失敗不結束迴圈：退開設定的秒數再試，下一輪照常領件。
-    @Test
-    func `backs off and keeps polling after a failed request`() async throws {
-        let transport: ScriptedPollTransport = .init([
-            .fail, .respond(assignedJob), .respond(.init(statusCode: 200)),
-        ])
-        let waits: Mutex<[TimeInterval]> = .init([])
-        let loop: JobPollingLoop = .init(
-            client: .init(transport: transport),
-            backend: InMemoryExecutionBackend(),
-            reporter: .init(client: .init(transport: transport), wait: { _ in }),
-            configuration: configuration,
-            wait: { seconds in waits.withLock { $0.append(seconds) } }
-        )
-        let lines: Mutex<[String]> = .init([])
-        await loop.run(stopAfterFirstJob: true, isStopped: { false }, logger: CapturingLogHandler.logger { _, line in
-            lines.withLock { $0.append(line) }
-        })
-        #expect(waits.withLock { $0 } == [30])
-        #expect(lines.withLock { $0.first }?.hasPrefix("poll failed") == true)
-        let polls: [HTTPRequest] = transport.requests.withLock { $0.filter { $0.url.lastPathComponent == "request" } }
-        #expect(polls.count == 2)
-    }
+	/// 領件失敗不結束迴圈：退開設定的秒數再試，下一輪照常領件。
+	@Test
+	private func `backs off and keeps polling after a failed request`() async {
+		let transport: ScriptedPollTransport = .init([
+			.fail, .respond(assignedJob), .respond(.init(statusCode: 200))
+		])
+		let waits: Mutex<[TimeInterval]> = .init([])
+		let loop: JobPollingLoop = .init(
+			client: .init(transport: transport),
+			backend: InMemoryExecutionBackend(),
+			reporter: .init(client: .init(transport: transport), wait: { _ in }),
+			configuration: configuration,
+			wait: { seconds in waits.withLock { $0.append(seconds) } }
+		)
+		let lines: Mutex<[String]> = .init([])
+		await loop.run(stopAfterFirstJob: true, isStopped: { false }, logger: CapturingLogHandler.logger { _, line in
+			lines.withLock { $0.append(line) }
+		})
+		#expect(waits.withLock { $0 } == [30])
+		#expect(lines.withLock { $0.first }?.hasPrefix("poll failed") == true)
+		let polls: [HTTPRequest] = transport.requests.withLock { $0.filter { $0.url.lastPathComponent == "request" } }
+		#expect(polls.count == 2)
+	}
 
-    /// 出事的那幾行走 error 等級：紀錄門檻調高時，這一圈唯一還留得住的就該是它們。
-    @Test
-    func `writes failures at the error level and the rest at info`() async throws {
-        let transport: ScriptedPollTransport = .init([
-            .fail, .respond(assignedJob), .respond(.init(statusCode: 200)),
-        ])
-        let loop: JobPollingLoop = .init(
-            client: .init(transport: transport),
-            backend: InMemoryExecutionBackend(),
-            reporter: .init(client: .init(transport: transport), wait: { _ in }),
-            configuration: configuration,
-            wait: { _ in }
-        )
-        let lines: Mutex<[String]> = .init([])
-        let levels: Mutex<[Logger.Level]> = .init([])
-        await loop.run(
-            stopAfterFirstJob: true,
-            isStopped: { false },
-            logger: CapturingLogHandler.logger { level, line in
-                lines.withLock { $0.append(line) }
-                levels.withLock { $0.append(level) }
-            }
-        )
-        #expect(lines.withLock { $0.first }?.hasPrefix("poll failed") == true)
-        #expect(levels.withLock { $0 } == [.error, .info])
-    }
+	/// 出事的那幾行走 error 等級：紀錄門檻調高時，這一圈唯一還留得住的就該是它們。
+	@Test
+	private func `writes failures at the error level and the rest at info`() async {
+		let transport: ScriptedPollTransport = .init([
+			.fail, .respond(assignedJob), .respond(.init(statusCode: 200))
+		])
+		let loop: JobPollingLoop = .init(
+			client: .init(transport: transport),
+			backend: InMemoryExecutionBackend(),
+			reporter: .init(client: .init(transport: transport), wait: { _ in }),
+			configuration: configuration,
+			wait: { _ in }
+		)
+		let lines: Mutex<[String]> = .init([])
+		let levels: Mutex<[Logger.Level]> = .init([])
+		await loop.run(
+			stopAfterFirstJob: true,
+			isStopped: { false },
+			logger: CapturingLogHandler.logger { level, line in
+				lines.withLock { $0.append(line) }
+				levels.withLock { $0.append(level) }
+			}
+		)
+		#expect(lines.withLock { $0.first }?.hasPrefix("poll failed") == true)
+		#expect(levels.withLock { $0 } == [.error, .info])
+	}
 
-    /// 這一輪沒有工作也要退開再敲：站台沒把連線 hold 住時，這段等待是唯一擋住緊迴圈的東西。
-    @Test
-    func `backs off before polling again when no job is available`() async throws {
-        let transport: ScriptedPollTransport = .init([
-            .respond(.init(statusCode: 204, headers: ["X-GitLab-Last-Update": "cursor-2"])),
-            .respond(assignedJob),
-            .respond(.init(statusCode: 200)),
-        ])
-        let waits: Mutex<[TimeInterval]> = .init([])
-        let loop: JobPollingLoop = .init(
-            client: .init(transport: transport),
-            backend: InMemoryExecutionBackend(),
-            reporter: .init(client: .init(transport: transport), wait: { _ in }),
-            configuration: configuration,
-            wait: { seconds in waits.withLock { $0.append(seconds) } }
-        )
-        let lines: Mutex<[String]> = .init([])
-        await loop.run(stopAfterFirstJob: true, isStopped: { false }, logger: CapturingLogHandler.logger { _, line in
-            lines.withLock { $0.append(line) }
-        })
-        #expect(waits.withLock { $0 } == [30])
-        #expect(lines.withLock { $0.first } == "no job available")
-        let polls: [HTTPRequest] = transport.requests.withLock { $0.filter { $0.url.lastPathComponent == "request" } }
-        #expect(polls.count == 2)
-        // 退開一段再敲不該把游標弄丟：下一輪照樣帶著站台上一輪發的那一個。
-        #expect(try requestBody(of: polls[1])["last_update"] as? String == "cursor-2")
-    }
+	/// 這一輪沒有工作也要退開再敲：站台沒把連線 hold 住時，這段等待是唯一擋住緊迴圈的東西。
+	@Test
+	private func `backs off before polling again when no job is available`() async throws {
+		let transport: ScriptedPollTransport = .init([
+			.respond(.init(statusCode: 204, headers: ["X-GitLab-Last-Update": "cursor-2"])),
+			.respond(assignedJob),
+			.respond(.init(statusCode: 200))
+		])
+		let waits: Mutex<[TimeInterval]> = .init([])
+		let loop: JobPollingLoop = .init(
+			client: .init(transport: transport),
+			backend: InMemoryExecutionBackend(),
+			reporter: .init(client: .init(transport: transport), wait: { _ in }),
+			configuration: configuration,
+			wait: { seconds in waits.withLock { $0.append(seconds) } }
+		)
+		let lines: Mutex<[String]> = .init([])
+		await loop.run(stopAfterFirstJob: true, isStopped: { false }, logger: CapturingLogHandler.logger { _, line in
+			lines.withLock { $0.append(line) }
+		})
+		#expect(waits.withLock { $0 } == [30])
+		#expect(lines.withLock { $0.first } == "no job available")
+		let polls: [HTTPRequest] = transport.requests.withLock { $0.filter { $0.url.lastPathComponent == "request" } }
+		#expect(polls.count == 2)
+		// 退開一段再敲不該把游標弄丟：下一輪照樣帶著站台上一輪發的那一個。
+		#expect(try requestBody(of: polls[1])["last_update"] as? String == "cursor-2")
+	}
 
-    /// 領件失敗那一行不帶憑證：傳輸層的錯誤把整條網址帶在身上，而站台位址收得下憑證。
-    @Test
-    func `keeps credentials out of the line logged for a failed request`() async throws {
-        let transport: ScriptedPollTransport = .init([.failWithCredentialBearingURL, .respond(assignedJob)])
-        let loop: JobPollingLoop = .init(
-            client: .init(transport: transport),
-            backend: InMemoryExecutionBackend(),
-            reporter: .init(client: .init(transport: transport), wait: { _ in }),
-            configuration: configuration,
-            wait: { _ in },
-            resendWait: { _ in }
-        )
-        let lines: Mutex<[String]> = .init([])
-        await loop.run(stopAfterFirstJob: true, isStopped: { false }, logger: CapturingLogHandler.logger { _, line in
-            lines.withLock { $0.append(line) }
-        })
-        let first: String = try #require(lines.withLock { $0.first })
-        #expect(first.hasPrefix("poll failed"))
-        #expect(!first.contains("glpat-synthetic"))
-        #expect(first.contains("https://gitlab.example.invalid"))
-    }
+	/// 領件失敗那一行不帶憑證：傳輸層的錯誤把整條網址帶在身上，而站台位址收得下憑證。
+	@Test
+	private func `keeps credentials out of the line logged for a failed request`() async throws {
+		let transport: ScriptedPollTransport = .init([.failWithCredentialBearingURL, .respond(assignedJob)])
+		let loop: JobPollingLoop = .init(
+			client: .init(transport: transport),
+			backend: InMemoryExecutionBackend(),
+			reporter: .init(client: .init(transport: transport), wait: { _ in }),
+			configuration: configuration,
+			wait: { _ in },
+			resendWait: { _ in }
+		)
+		let lines: Mutex<[String]> = .init([])
+		await loop.run(stopAfterFirstJob: true, isStopped: { false }, logger: CapturingLogHandler.logger { _, line in
+			lines.withLock { $0.append(line) }
+		})
+		let first: String = try #require(lines.withLock { $0.first })
+		#expect(first.hasPrefix("poll failed"))
+		#expect(!first.contains("glpat-synthetic"))
+		#expect(first.contains("https://gitlab.example.invalid"))
+	}
 
-    /// 回寫失敗那一行同樣不帶憑證：兩條錯誤路徑走同一套收斂。
-    @Test
-    func `keeps credentials out of the line logged for an undeliverable report`() async throws {
-        let transport: ScriptedPollTransport = .init([.respond(assignedJob), .failWithCredentialBearingURL])
-        let loop: JobPollingLoop = .init(
-            client: .init(transport: transport),
-            backend: InMemoryExecutionBackend(),
-            reporter: .init(client: .init(transport: transport), wait: { _ in }),
-            configuration: configuration,
-            wait: { _ in },
-            resendWait: { _ in }
-        )
-        let lines: Mutex<[String]> = .init([])
-        await loop.run(stopAfterFirstJob: true, isStopped: { false }, logger: CapturingLogHandler.logger { _, line in
-            lines.withLock { $0.append(line) }
-        })
-        let first: String = try #require(lines.withLock { $0.first })
-        #expect(first.hasPrefix("job 7 report failed"))
-        #expect(!first.contains("glpat-synthetic"))
-        #expect(first.contains("https://gitlab.example.invalid"))
-    }
+	/// 回寫失敗那一行同樣不帶憑證：兩條錯誤路徑走同一套收斂。
+	@Test
+	private func `keeps credentials out of the line logged for an undeliverable report`() async throws {
+		let transport: ScriptedPollTransport = .init([.respond(assignedJob), .failWithCredentialBearingURL])
+		let loop: JobPollingLoop = .init(
+			client: .init(transport: transport),
+			backend: InMemoryExecutionBackend(),
+			reporter: .init(client: .init(transport: transport), wait: { _ in }),
+			configuration: configuration,
+			wait: { _ in },
+			resendWait: { _ in }
+		)
+		let lines: Mutex<[String]> = .init([])
+		await loop.run(stopAfterFirstJob: true, isStopped: { false }, logger: CapturingLogHandler.logger { _, line in
+			lines.withLock { $0.append(line) }
+		})
+		let first: String = try #require(lines.withLock { $0.first })
+		#expect(first.hasPrefix("job 7 report failed"))
+		#expect(!first.contains("glpat-synthetic"))
+		#expect(first.contains("https://gitlab.example.invalid"))
+	}
 
-    /// 回寫第一次送不出去就重送一次；送到了照樣是「經手完一件」。
-    @Test
-    func `resends the report once when the first attempt fails`() async throws {
-        let transport: ScriptedPollTransport = .init([
-            .respond(assignedJob), .fail, .respond(.init(statusCode: 200)),
-        ])
-        let waits: Mutex<[TimeInterval]> = .init([])
-        let resendWaits: Mutex<[TimeInterval]> = .init([])
-        let loop: JobPollingLoop = .init(
-            client: .init(transport: transport),
-            backend: InMemoryExecutionBackend(),
-            reporter: .init(client: .init(transport: transport), wait: { _ in }),
-            configuration: configuration,
-            wait: { seconds in waits.withLock { $0.append(seconds) } },
-            resendWait: { seconds in resendWaits.withLock { $0.append(seconds) } }
-        )
-        let cycle: JobCycle = try await loop.poll(cursor: nil)
-        // 重送前的等待走自己那一支：走迴圈那支的話，喊停會把它縮成零、對故障端點立刻重送。
-        #expect(resendWaits.withLock { $0 } == [30])
-        #expect(waits.withLock { $0 }.isEmpty)
-        #expect(cycle.disposition == .handled(jobIdentifier: 7, outcome: .completed, delivery: .init(
-            acceptance: .written, traceIsComplete: true, updateAttempts: 1
-        )))
-    }
+	/// 回寫第一次送不出去就重送一次；送到了照樣是「經手完一件」。
+	@Test
+	private func `resends the report once when the first attempt fails`() async throws {
+		let transport: ScriptedPollTransport = .init([
+			.respond(assignedJob), .fail, .respond(.init(statusCode: 200))
+		])
+		let waits: Mutex<[TimeInterval]> = .init([])
+		let resendWaits: Mutex<[TimeInterval]> = .init([])
+		let loop: JobPollingLoop = .init(
+			client: .init(transport: transport),
+			backend: InMemoryExecutionBackend(),
+			reporter: .init(client: .init(transport: transport), wait: { _ in }),
+			configuration: configuration,
+			wait: { seconds in waits.withLock { $0.append(seconds) } },
+			resendWait: { seconds in resendWaits.withLock { $0.append(seconds) } }
+		)
+		let cycle: JobCycle = try await loop.poll(cursor: nil)
+		// 重送前的等待走自己那一支：走迴圈那支的話，喊停會把它縮成零、對故障端點立刻重送。
+		#expect(resendWaits.withLock { $0 } == [30])
+		#expect(waits.withLock { $0 }.isEmpty)
+		#expect(cycle.disposition == .handled(jobIdentifier: 7, outcome: .completed, delivery: .init(
+			acceptance: .written, traceIsComplete: true, updateAttempts: 1
+		)))
+	}
 
-    /// 回寫兩次都送不出去：拋的是帶著 job 識別碼的錯，不是領件那一種。
-    @Test
-    func `reports which job could not be delivered`() async throws {
-        let transport: ScriptedPollTransport = .init([.respond(assignedJob), .fail])
-        let loop: JobPollingLoop = .init(
-            client: .init(transport: transport),
-            backend: InMemoryExecutionBackend(),
-            reporter: .init(client: .init(transport: transport), wait: { _ in }),
-            configuration: configuration,
-            wait: { _ in },
-            resendWait: { _ in }
-        )
-        await #expect(throws: JobDeliveryFailure.self) {
-            _ = try await loop.poll(cursor: nil)
-        }
-    }
+	/// 回寫兩次都送不出去：拋的是帶著 job 識別碼的錯，不是領件那一種。
+	@Test
+	private func `reports which job could not be delivered`() async throws {
+		let transport: ScriptedPollTransport = .init([.respond(assignedJob), .fail])
+		let loop: JobPollingLoop = .init(
+			client: .init(transport: transport),
+			backend: InMemoryExecutionBackend(),
+			reporter: .init(client: .init(transport: transport), wait: { _ in }),
+			configuration: configuration,
+			wait: { _ in },
+			resendWait: { _ in }
+		)
+		await #expect(throws: JobDeliveryFailure.self) {
+			_ = try await loop.poll(cursor: nil)
+		}
+	}
 
-    /// `--once` 遇上回寫失敗照樣收工：那件 job 已經跑過，再領第二件等於同機疊工作。
-    @Test
-    func `stops after a handled job even when the report cannot be delivered`() async throws {
-        let transport: ScriptedPollTransport = .init([.respond(assignedJob), .fail])
-        let loop: JobPollingLoop = .init(
-            client: .init(transport: transport),
-            backend: InMemoryExecutionBackend(),
-            reporter: .init(client: .init(transport: transport), wait: { _ in }),
-            configuration: configuration,
-            wait: { _ in },
-            resendWait: { _ in }
-        )
-        let lines: Mutex<[String]> = .init([])
-        await loop.run(stopAfterFirstJob: true, isStopped: { false }, logger: CapturingLogHandler.logger { _, line in
-            lines.withLock { $0.append(line) }
-        })
-        let polls: [HTTPRequest] = transport.requests.withLock { $0.filter { $0.url.lastPathComponent == "request" } }
-        #expect(polls.count == 1)
-        #expect(lines.withLock { $0 } == ["job 7 report failed: TransportOutage()"])
-    }
+	/// `--once` 遇上回寫失敗照樣收工：那件 job 已經跑過，再領第二件等於同機疊工作。
+	@Test
+	private func `stops after a handled job even when the report cannot be delivered`() async {
+		let transport: ScriptedPollTransport = .init([.respond(assignedJob), .fail])
+		let loop: JobPollingLoop = .init(
+			client: .init(transport: transport),
+			backend: InMemoryExecutionBackend(),
+			reporter: .init(client: .init(transport: transport), wait: { _ in }),
+			configuration: configuration,
+			wait: { _ in },
+			resendWait: { _ in }
+		)
+		let lines: Mutex<[String]> = .init([])
+		await loop.run(stopAfterFirstJob: true, isStopped: { false }, logger: CapturingLogHandler.logger { _, line in
+			lines.withLock { $0.append(line) }
+		})
+		let polls: [HTTPRequest] = transport.requests.withLock { $0.filter { $0.url.lastPathComponent == "request" } }
+		#expect(polls.count == 1)
+		#expect(lines.withLock { $0 } == ["job 7 report failed: TransportOutage()"])
+	}
 
-    /// 拒收那一路的回寫失敗走同一條路：一樣指名 job、一樣讓 `--once` 收工。
-    @Test
-    func `treats an undeliverable refusal as a handled job`() async throws {
-        let transport: ScriptedPollTransport = .init([.respond(containerJob), .fail])
-        let loop: JobPollingLoop = .init(
-            client: .init(transport: transport),
-            backend: InMemoryExecutionBackend(),
-            reporter: .init(client: .init(transport: transport), wait: { _ in }),
-            configuration: configuration,
-            wait: { _ in },
-            resendWait: { _ in }
-        )
-        let lines: Mutex<[String]> = .init([])
-        await loop.run(stopAfterFirstJob: true, isStopped: { false }, logger: CapturingLogHandler.logger { _, line in
-            lines.withLock { $0.append(line) }
-        })
-        #expect(lines.withLock { $0.first }?.hasPrefix("job 9 report failed") == true)
-    }
+	/// 拒收那一路的回寫失敗走同一條路：一樣指名 job、一樣讓 `--once` 收工。
+	@Test
+	private func `treats an undeliverable refusal as a handled job`() async {
+		let transport: ScriptedPollTransport = .init([.respond(containerJob), .fail])
+		let loop: JobPollingLoop = .init(
+			client: .init(transport: transport),
+			backend: InMemoryExecutionBackend(),
+			reporter: .init(client: .init(transport: transport), wait: { _ in }),
+			configuration: configuration,
+			wait: { _ in },
+			resendWait: { _ in }
+		)
+		let lines: Mutex<[String]> = .init([])
+		await loop.run(stopAfterFirstJob: true, isStopped: { false }, logger: CapturingLogHandler.logger { _, line in
+			lines.withLock { $0.append(line) }
+		})
+		#expect(lines.withLock { $0.first }?.hasPrefix("job 9 report failed") == true)
+	}
 }
+
+// MARK: - JobPollingLoopStopTests
 
 /// 喊停這條路的迴圈側行為：哪幾段等待叫得醒、哪幾段刻意叫不醒。
 private final class JobPollingLoopStopTests {
 
-    /// 喊停不會把回寫重送前的那段等待縮短：那一段走的是自己那支等待。
-    ///
-    /// 縮成零的話，喊停當下手上那件 job 會對著仍在故障的站台立刻重送第二次、隨即拋錯，結果就
-    /// 此遺失；退避留著才有復原的窗。此處驗的是「走哪一支」，睡不睡得滿由預設的 `sleep` 決定。
-    @Test
-    func `keeps the resend backoff beyond the reach of a stop`() async throws {
-        let transport: ScriptedPollTransport = .init([
-            .respond(assignedJob), .fail, .respond(.init(statusCode: 200)),
-        ])
-        let signal: StopSignal = .init()
-        let resendWaits: Mutex<[TimeInterval]> = .init([])
-        let loop: JobPollingLoop = .init(
-            client: .init(transport: transport),
-            backend: InMemoryExecutionBackend(),
-            reporter: .init(client: .init(transport: transport), wait: { _ in }),
-            configuration: configuration,
-            wait: { seconds in await signal.wait(seconds) },
-            resendWait: { seconds in resendWaits.withLock { $0.append(seconds) } }
-        )
-        signal.stop()
-        let cycle: JobCycle = try await loop.poll(cursor: nil)
-        #expect(resendWaits.withLock { $0 } == [30])
-        #expect(cycle.disposition == .handled(jobIdentifier: 7, outcome: .completed, delivery: .init(
-            acceptance: .written, traceIsComplete: true, updateAttempts: 1
-        )))
-    }
+	/// 喊停不會把回寫重送前的那段等待縮短：那一段走的是自己那支等待。
+	///
+	/// 縮成零的話，喊停當下手上那件 job 會對著仍在故障的站台立刻重送第二次、隨即拋錯，結果就
+	/// 此遺失；退避留著才有復原的窗。此處驗的是「走哪一支」，睡不睡得滿由預設的 `sleep` 決定。
+	@Test
+	private func `keeps the resend backoff beyond the reach of a stop`() async throws {
+		let transport: ScriptedPollTransport = .init([
+			.respond(assignedJob), .fail, .respond(.init(statusCode: 200))
+		])
+		let signal: StopSignal = .init()
+		let resendWaits: Mutex<[TimeInterval]> = .init([])
+		let loop: JobPollingLoop = .init(
+			client: .init(transport: transport),
+			backend: InMemoryExecutionBackend(),
+			reporter: .init(client: .init(transport: transport), wait: { _ in }),
+			configuration: configuration,
+			wait: { seconds in await signal.wait(seconds) },
+			resendWait: { seconds in resendWaits.withLock { $0.append(seconds) } }
+		)
+		signal.stop()
+		let cycle: JobCycle = try await loop.poll(cursor: nil)
+		#expect(resendWaits.withLock { $0 } == [30])
+		#expect(cycle.disposition == .handled(jobIdentifier: 7, outcome: .completed, delivery: .init(
+			acceptance: .written, traceIsComplete: true, updateAttempts: 1
+		)))
+	}
 
-    /// 退避途中喊停就直接收工：注入 ``StopSignal`` 當等待，喊停會把那段等待叫斷。
-    ///
-    /// 沒有這條路的話，喊停要等退避睡滿才被讀到——服務管理器的收工寬限比那短時，等來的是強殺。
-    @Test
-    func `stops during the backoff when the wait can be woken`() async throws {
-        let transport: ScriptedPollTransport = .init([
-            .respond(.init(statusCode: 204, headers: ["X-GitLab-Last-Update": "cursor-2"])),
-        ])
-        let signal: StopSignal = .init()
-        let loop: JobPollingLoop = .init(
-            client: .init(transport: transport),
-            backend: InMemoryExecutionBackend(),
-            reporter: .init(client: .init(transport: transport), wait: { _ in }),
-            configuration: configuration,
-            wait: { seconds in await signal.wait(seconds) }
-        )
-        let startedAt: Date = .init()
-        async let finished: Void = loop.run(
-            stopAfterFirstJob: false,
-            isStopped: { signal.isStopped },
-            logger: CapturingLogHandler.logger { _, _ in }
-        )
-        // 等第一輪真的敲出去、進到那段三十秒的退避裡，喊停才是在等待途中。
-        while transport.requests.withLock({ $0.isEmpty }) { try await Task.sleep(for: .milliseconds(10)) }
-        try await Task.sleep(for: .milliseconds(50))
-        signal.stop()
-        await finished
-        // 退避是三十秒；叫得醒的話這裡是毫秒級，叫不醒就會撞上這道上限。
-        #expect(Date().timeIntervalSince(startedAt) < 5)
-        let polls: [HTTPRequest] = transport.requests.withLock { $0.filter { $0.url.lastPathComponent == "request" } }
-        #expect(polls.count == 1)
-    }
+	/// 退避途中喊停就直接收工：注入 ``StopSignal`` 當等待，喊停會把那段等待叫斷。
+	///
+	/// 沒有這條路的話，喊停要等退避睡滿才被讀到——服務管理器的收工寬限比那短時，等來的是強殺。
+	@Test
+	private func `stops during the backoff when the wait can be woken`() async throws {
+		let transport: ScriptedPollTransport = .init([
+			.respond(.init(statusCode: 204, headers: ["X-GitLab-Last-Update": "cursor-2"]))
+		])
+		let signal: StopSignal = .init()
+		let loop: JobPollingLoop = .init(
+			client: .init(transport: transport),
+			backend: InMemoryExecutionBackend(),
+			reporter: .init(client: .init(transport: transport), wait: { _ in }),
+			configuration: configuration,
+			wait: { seconds in await signal.wait(seconds) }
+		)
+		let startedAt: Date = .init()
+		async let finished: Void = loop.run(
+			stopAfterFirstJob: false,
+			isStopped: { signal.isStopped },
+			logger: CapturingLogHandler.logger { _, _ in }
+		)
+		// 等第一輪真的敲出去、進到那段三十秒的退避裡，喊停才是在等待途中。
+		while transport.requests.withLock({ $0.isEmpty }) {
+			try await Task.sleep(for: .milliseconds(10))
+		}
+		try await Task.sleep(for: .milliseconds(50))
+		signal.stop()
+		await finished
+		// 退避是三十秒；叫得醒的話這裡是毫秒級，叫不醒就會撞上這道上限。
+		#expect(Date().timeIntervalSince(startedAt) < 5)
+		let polls: [HTTPRequest] = transport.requests.withLock { $0.filter { $0.url.lastPathComponent == "request" } }
+		#expect(polls.count == 1)
+	}
 
-    /// 已經被喊停就一次都不敲——停止旗標在每一輪開始前問。
-    @Test
-    func `does not poll once stopped`() async throws {
-        let transport: ScriptedPollTransport = .init([.respond(assignedJob)])
-        let loop: JobPollingLoop = .init(
-            client: .init(transport: transport),
-            backend: InMemoryExecutionBackend(),
-            configuration: configuration
-        )
-        await loop.run(stopAfterFirstJob: false, isStopped: { true }, logger: CapturingLogHandler.logger { _, _ in })
-        #expect(transport.requests.withLock { $0.isEmpty })
-    }
+	/// 已經被喊停就一次都不敲——停止旗標在每一輪開始前問。
+	@Test
+	private func `does not poll once stopped`() async {
+		let transport: ScriptedPollTransport = .init([.respond(assignedJob)])
+		let loop: JobPollingLoop = .init(
+			client: .init(transport: transport),
+			backend: InMemoryExecutionBackend(),
+			configuration: configuration
+		)
+		await loop.run(stopAfterFirstJob: false, isStopped: { true }, logger: CapturingLogHandler.logger { _, _ in })
+		#expect(transport.requests.withLock { $0.isEmpty })
+	}
 }

@@ -21,59 +21,62 @@ import Synchronization
 /// job 不因此被從中間丟下。
 public final class StopSignal: Sendable {
 
-    /// 旗標與此刻登記在案的等待。
-    private struct State {
+	/// 是否已被喊停；領件迴圈每一輪開始前問的就是這一個。
+	public var isStopped: Bool {
+		state.withLock { $0.isStopped }
+	}
 
-        /// 是否已被喊停。
-        var isStopped: Bool = false
+	/// 喊停：翻旗標，並把此刻停在 ``wait(_:)`` 裡的等待全部叫醒。
+	///
+	/// 可重複呼叫，也可以從訊號處理器那種非 async 的地方呼叫。
+	public func stop() {
+		let sleepers: [Task<Void, Never>] = state.withLock { state in
+			state.isStopped = true
+			let running: [Task<Void, Never>] = .init(state.sleepers.values)
+			state.sleepers.removeAll()
+			return running
+		}
+		for sleeper in sleepers {
+			sleeper.cancel()
+		}
+	}
 
-        /// 正在等待的那些 Task，以識別碼登記，等完或被取消即撤下。
-        var sleepers: [UUID: Task<Void, Never>] = [:]
-    }
+	/// 等指定秒數，中途被喊停就立刻回來。
+	///
+	/// 已經被喊停時一秒都不等。等待本身跑在另開的一顆 Task 裡，``stop()`` 取消的是它；
+	/// 呼叫端被取消時同樣叫得醒——那顆 Task 會跟著被取消，與直接 `Task.sleep` 的行為一致。
+	///
+	/// - Parameter seconds: 最多等多久。
+	public func wait(_ seconds: TimeInterval) async {
+		guard !isStopped else { return }
+		let identifier: UUID = .init()
+		let sleeper: Task<Void, Never> = .init { try? await Task.sleep(for: .seconds(seconds)) }
+		// 另開 Task 與登記之間可能剛好被喊停；登記在鎖內重問一次旗標，那一槍才不會落空。
+		let stoppedMeanwhile: Bool = state.withLock { state in
+			guard !state.isStopped else { return true }
+			state.sleepers[identifier] = sleeper
+			return false
+		}
+		if stoppedMeanwhile { sleeper.cancel() }
+		// 呼叫端被取消時也要醒：等待跑在另一顆 Task 上，取消不會自己傳過去。
+		await withTaskCancellationHandler { await sleeper.value } onCancel: { sleeper.cancel() }
+		state.withLock { $0.sleepers[identifier] = nil }
+	}
 
-    /// 受鎖保護的內部狀態。
-    private let state: Mutex<State> = .init(.init())
+	/// 建立一支尚未被喊停的訊號。
+	public init() {}
 
-    /// 建立一支尚未被喊停的訊號。
-    public init() {}
+	/// 旗標與此刻登記在案的等待。
+	private struct State {
 
-    /// 是否已被喊停；領件迴圈每一輪開始前問的就是這一個。
-    public var isStopped: Bool {
-        state.withLock { $0.isStopped }
-    }
+		/// 是否已被喊停。
+		var isStopped: Bool = false
 
-    /// 喊停：翻旗標，並把此刻停在 ``wait(_:)`` 裡的等待全部叫醒。
-    ///
-    /// 可重複呼叫，也可以從訊號處理器那種非 async 的地方呼叫。
-    public func stop() {
-        let sleepers: [Task<Void, Never>] = state.withLock { state in
-            state.isStopped = true
-            let running: [Task<Void, Never>] = .init(state.sleepers.values)
-            state.sleepers.removeAll()
-            return running
-        }
-        for sleeper in sleepers { sleeper.cancel() }
-    }
+		/// 正在等待的那些 Task，以識別碼登記，等完或被取消即撤下。
+		var sleepers: [UUID: Task<Void, Never>] = [:]
+	}
 
-    /// 等指定秒數，中途被喊停就立刻回來。
-    ///
-    /// 已經被喊停時一秒都不等。等待本身跑在另開的一顆 Task 裡，``stop()`` 取消的是它；
-    /// 呼叫端被取消時同樣叫得醒——那顆 Task 會跟著被取消，與直接 `Task.sleep` 的行為一致。
-    ///
-    /// - Parameter seconds: 最多等多久。
-    public func wait(_ seconds: TimeInterval) async {
-        guard !isStopped else { return }
-        let identifier: UUID = .init()
-        let sleeper: Task<Void, Never> = .init { try? await Task.sleep(for: .seconds(seconds)) }
-        // 另開 Task 與登記之間可能剛好被喊停；登記在鎖內重問一次旗標，那一槍才不會落空。
-        let stoppedMeanwhile: Bool = state.withLock { state in
-            guard !state.isStopped else { return true }
-            state.sleepers[identifier] = sleeper
-            return false
-        }
-        if stoppedMeanwhile { sleeper.cancel() }
-        // 呼叫端被取消時也要醒：等待跑在另一顆 Task 上，取消不會自己傳過去。
-        await withTaskCancellationHandler { await sleeper.value } onCancel: { sleeper.cancel() }
-        state.withLock { $0.sleepers[identifier] = nil }
-    }
+	/// 受鎖保護的內部狀態。
+	private let state: Mutex<State> = .init(.init())
+
 }
