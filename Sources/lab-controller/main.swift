@@ -126,15 +126,17 @@ if let run: RunCommand = parsedCommand as? RunCommand {
 		transport: UnixSocketNymphTransport(socketPath: run.resolvedSocketPath),
 		configuration: run.backendConfiguration
 	)
-	// 停止訊號同時當旗標與等待的鬧鐘：兩輪之間的退避有三十秒，只翻旗標的話喊停要等睡滿才被
-	// 讀到，服務管理器的收工寬限比那段等待短時，閒著的行程每次停止都以逾時強殺收場。取消只
-	// 落在退避那顆另開的 Task 上、不碰正在跑的 job。訊號只接在兩輪之間的退避上——回寫重送前
-	// 的等待是另一支、照樣睡滿，那一段提早醒等於對著仍在故障的站台立刻重送。
+	// 停止訊號同時當旗標、等待的鬧鐘與在飛領件的取消閘：兩輪之間的退避有三十秒，在飛的領件更
+	// 是 long-poll、hold 多久由站台端決定，只翻旗標的話喊停要等它們自己結束才被讀到，服務管理器
+	// 的收工寬限比那段等待短時，閒著的行程每次停止都以逾時強殺收場。取消只落在退避與領件另開的
+	// Task 上、不碰正在跑的 job。回寫重送前的等待是另一支、照樣睡滿，那一段提早醒等於對著仍在
+	// 故障的站台立刻重送。
 	let stopSignal: StopSignal = .init()
 	let loop: JobPollingLoop = .init(
 		backend: backend,
 		configuration: .init(host: run.host, runnerToken: runnerToken, image: run.image),
-		wait: { seconds in await stopSignal.wait(seconds) }
+		wait: { seconds in await stopSignal.wait(seconds) },
+		requestScope: { request in try await stopSignal.cancelWhenStopped(request) }
 	)
 	let sources: [any DispatchSourceSignal] = installStopHandlers { stopSignal.stop() }
 	// 站台位址只印 scheme／host／port：`--host` 收得下 `https://oauth2:<token>@…` 這種形狀，

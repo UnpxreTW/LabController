@@ -122,6 +122,21 @@ public struct JobPollingLoop: Sendable {
 		try? await Task.sleep(for: .seconds(seconds))
 	}
 
+	/// 直接跑領件那一段，不在外面加任何打斷得了它的東西。
+	///
+	/// - Warning: 這一份打不斷——領件是 long-poll，連線 hold 多久由站台端決定，喊停要等回應自己
+	///   回來才讀得到。要讓喊停立刻結束在飛的領件，建立迴圈時把 `requestScope` 換成一支
+	///   ``StopSignal`` 的 ``StopSignal/cancelWhenStopped(_:)``。
+	///
+	/// - Parameter request: 領件那一段。
+	/// - Returns: 領件的結果。
+	/// - Throws: 領件自己拋的錯誤。
+	public static func requestDirectly(
+		_ request: @escaping @Sendable () async throws -> JobRequestResult
+	) async throws -> JobRequestResult {
+		try await request()
+	}
+
 	/// 協議層 client；領件與回寫共用同一個。
 	public let client: JobRequestClient
 
@@ -142,12 +157,16 @@ public struct JobPollingLoop: Sendable {
 	///   一次），兩者分開才知道那件 job 有沒有被經手。**跑 job 本身不會拋**——跑不成也是一份
 	///   結果，照樣回寫給站台（見 ``JobRunner/run(_:on:)``）。
 	public func poll(cursor: String?) async throws -> JobCycle {
-		let result: JobRequestResult = try await client.requestJob(
-			host: configuration.host,
-			token: configuration.runnerToken,
-			lastUpdate: cursor,
-			info: .init(features: Self.declaredFeatures)
-		)
+		// 只有領件這一段包在可取消的範圍裡：跑 job 與回寫都在後面，那兩段被取消等於把一件
+		// 已經經手的 job 丟掉，站台端會看到它一路掛到自己判死。
+		let result: JobRequestResult = try await requestScope {
+			try await client.requestJob(
+				host: configuration.host,
+				token: configuration.runnerToken,
+				lastUpdate: cursor,
+				info: .init(features: Self.declaredFeatures)
+			)
+		}
 		guard case let .assigned(job) = result.outcome else {
 			return .init(disposition: .idle, cursor: result.lastUpdate)
 		}
@@ -178,12 +197,18 @@ public struct JobPollingLoop: Sendable {
 	/// 回應立刻就回來，本側不退就會以每秒十幾次的速度重敲同一支端點——那既是對站台的無謂
 	/// 壓力，也會把紀錄灌成一片同一行字。退避秒數與領件失敗共用 ``Configuration/retryInterval``。
 	///
-	/// **喊停最慢會等到當下這一輪走完**：領件是 long-poll，回應多久回來由站台端決定；跑到一半的
-	/// job 更不能從中間丟下——那會留下一台沒人收的 guest，以及站台端一件永遠停在執行中的 job。
-	/// 兩輪之間的退避則**叫得醒**——注入 ``StopSignal/wait(_:)`` 當 `wait` 時，喊停會把那幾段
-	/// 等待直接叫斷；沒注入就退回預設的 ``sleep(_:)``、只能等睡滿。**叫得醒的只有這幾段**：
-	/// 它們醒來後下一步都是回到本迴圈的停止條件。回寫重送前的那段等待走另一支 ``resendWait``、
-	/// 不受喊停影響，理由見 ``deliver(_:to:of:)``。
+	/// - Important: 喊停打斷得了的只有兩處：兩輪之間的退避、以及在飛的領件。退避注入
+	///   ``StopSignal/wait(_:)`` 當 `wait` 即叫得醒；領件注入
+	///   ``StopSignal/cancelWhenStopped(_:)`` 當 `requestScope` 即打得斷——領件是 long-poll，
+	///   連線 hold 多久由站台端決定，不打斷就得等回應自己回來。兩者沒注入時各自退回預設的
+	///   ``sleep(_:)`` 與 ``requestDirectly(_:)``、只能等。
+	///
+	/// - Important: 跑到一半的 job 照樣跑完並回寫——從中間丟下會留下一台沒人收的 guest，以及站台
+	///   端一件永遠停在執行中的 job，故取消的範圍收在領件那一段之內（見 ``poll(cursor:)``）。回寫
+	///   重送前的等待走另一支 ``resendWait``、同樣不受喊停影響，理由見 ``deliver(_:to:of:)``。
+	///
+	/// - Note: 打斷領件拋回來的取消不記成故障——喊停後迴圈就地收工，不寫 `poll failed`、也不再
+	///   退避一輪。
 	///
 	/// - Parameters:
 	///   - cursor: 起始游標；預設 nil。
@@ -213,6 +238,10 @@ public struct JobPollingLoop: Sendable {
 				await wait(configuration.retryInterval)
 				continue
 			} catch {
+				// 喊停打斷在飛的領件時，回來的是取消類錯誤——那不是故障，就地收工：記成 `poll failed`
+				// 會讓每次正常停止都在紀錄裡留一行假錯誤，再退避一輪更是白等。不分類錯誤型別、改問
+				// 旗標，`URLError(.cancelled)` 與 `CancellationError` 兩種形狀都收得住。
+				if isStopped() { return }
 				// 錯誤一律經 ``GitLabAPIError/safeDescription(of:)`` 再印：協議層自己拋的錯誤確實
 				// 已把站台網址收斂成 scheme／host／port，但傳輸層不是——`URLSession` 連不上時拋的
 				// `URLError` 原樣往上傳，`userInfo` 裡帶著送出去的整條網址，`--host` 的 userinfo 段
@@ -242,13 +271,17 @@ public struct JobPollingLoop: Sendable {
 	///   - configuration: 迴圈設定。
 	///   - wait: 兩輪之間退避時等待的方式；預設真的睡指定秒數。
 	///   - resendWait: 回寫重送前等待的方式；預設真的睡指定秒數。
+	///   - requestScope: 領件那一段跑在什麼範圍裡；預設直接跑、打不斷。
 	public init(
 		client: JobRequestClient = .init(),
 		backend: any ExecutionBackend,
 		reporter: JobResultReporter = .init(),
 		configuration: Configuration,
 		wait: @escaping @Sendable (TimeInterval) async -> Void = JobPollingLoop.sleep,
-		resendWait: @escaping @Sendable (TimeInterval) async -> Void = JobPollingLoop.sleep
+		resendWait: @escaping @Sendable (TimeInterval) async -> Void = JobPollingLoop.sleep,
+		requestScope: @escaping @Sendable (
+			@escaping @Sendable () async throws -> JobRequestResult
+		) async throws -> JobRequestResult = JobPollingLoop.requestDirectly
 	) {
 		self.client = client
 		self.backend = backend
@@ -256,6 +289,7 @@ public struct JobPollingLoop: Sendable {
 		self.configuration = configuration
 		self.wait = wait
 		self.resendWait = resendWait
+		self.requestScope = requestScope
 	}
 
 	// MARK: Private
@@ -299,6 +333,15 @@ public struct JobPollingLoop: Sendable {
 	/// 與 ``wait`` 分開的理由見 ``deliver(_:to:of:)``：那一段等完就直接往站台送第二次，被提早
 	/// 叫醒等於對著同一個故障端點立刻重送。
 	private let resendWait: @Sendable (TimeInterval) async -> Void
+
+	/// 領件那一段跑在什麼範圍裡；注入 ``StopSignal/cancelWhenStopped(_:)`` 即可讓喊停把在飛的
+	/// long-poll 直接打斷。
+	///
+	/// - Important: 範圍只框得住領件——跑 job 與回寫刻意留在外面，理由見 ``poll(cursor:)`` 內的
+	///   註解。
+	private let requestScope: @Sendable (
+		@escaping @Sendable () async throws -> JobRequestResult
+	) async throws -> JobRequestResult
 
 	/// 把一份結果送回站台；第一次送不出去就退開一段再送一次。
 	///
