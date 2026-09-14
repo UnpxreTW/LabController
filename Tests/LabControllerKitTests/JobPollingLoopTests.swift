@@ -529,6 +529,65 @@ private final class JobPollingLoopStopTests {
 		#expect(polls.count == 1)
 	}
 
+	/// 可取消的那個範圍只框得住領件：跑 job 與回寫刻意留在外面。
+	///
+	/// 框過頭的話，喊停落在 job 執行中就會連回寫一起取消——那件 job 已經在這台機器上跑完了，
+	/// 結果送不回去等於整趟白跑，站台端還會看著它一路掛到自己判死。
+	@Test
+	private func `scopes only the job request, not the run and report`() async {
+		let transport: ScriptedPollTransport = .init([.respond(assignedJob), .respond(.init(statusCode: 200))])
+		let requestsInsideScope: Mutex<Int> = .init(0)
+		let loop: JobPollingLoop = .init(
+			client: .init(transport: transport),
+			backend: InMemoryExecutionBackend(),
+			reporter: .init(client: .init(transport: transport), wait: { _ in }),
+			configuration: configuration,
+			wait: { _ in },
+			requestScope: { request in
+				let result: JobRequestResult = try await request()
+				// 範圍內敲出去幾次**全部**的請求：只數領件端點的話，連回寫一起框進來也看不出差別。
+				requestsInsideScope.withLock { $0 = transport.requests.withLock { $0.count } }
+				return result
+			}
+		)
+		await loop.run(stopAfterFirstJob: true, isStopped: { false }, logger: CapturingLogHandler.logger { _, _ in })
+		// 範圍裡只發生領件那一次，範圍外還有回寫——兩邊都要成立才算框對地方。
+		#expect(requestsInsideScope.withLock { $0 } == 1)
+		#expect(transport.requests.withLock { $0.count } > 1)
+	}
+
+	/// 領件被喊停打斷時就地收工，不記成故障、也不再退避一輪。
+	///
+	/// 打斷回來的是取消類錯誤，寫成 `poll failed` 會讓每次正常停止都在紀錄裡留一行假錯誤；
+	/// 再退避一輪更是白等——那一輪醒來後唯一會做的事就是讀旗標然後結束。
+	@Test
+	private func `stops quietly when the job request is cancelled`() async {
+		let transport: ScriptedPollTransport = .init([.respond(.init(statusCode: 204))])
+		let signal: StopSignal = .init()
+		let waits: Mutex<[TimeInterval]> = .init([])
+		let loop: JobPollingLoop = .init(
+			client: .init(transport: transport),
+			backend: InMemoryExecutionBackend(),
+			configuration: configuration,
+			wait: { seconds in waits.withLock { $0.append(seconds) } },
+			requestScope: { request in
+				// 站台此刻 hold 著連線，喊停正落在這中間：拋回來的形狀與真被取消時一樣。
+				signal.stop()
+				return try await signal.cancelWhenStopped(request)
+			}
+		)
+		let lines: Mutex<[String]> = .init([])
+		await loop.run(
+			stopAfterFirstJob: false,
+			isStopped: { signal.isStopped },
+			logger: CapturingLogHandler.logger { _, line in lines.withLock { $0.append(line) } }
+		)
+		// 打斷的那一次連敲都沒敲出去，紀錄與退避都該是空的。
+		#expect(transport.requests.withLock { $0.isEmpty })
+		#expect(lines.withLock { $0 }.isEmpty)
+		#expect(waits.withLock { $0 }.isEmpty)
+	}
+
 	/// 已經被喊停就一次都不敲——停止旗標在每一輪開始前問。
 	@Test
 	private func `does not poll once stopped`() async {
