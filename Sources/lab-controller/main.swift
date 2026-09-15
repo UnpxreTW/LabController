@@ -132,17 +132,24 @@ if let run: RunCommand = parsedCommand as? RunCommand {
 	// Task 上、不碰正在跑的 job。回寫重送前的等待是另一支、照樣睡滿，那一段提早醒等於對著仍在
 	// 故障的站台立刻重送。
 	let stopSignal: StopSignal = .init()
+	// 執行中的 job 的寬限：喊停之後才起算，且這一段刻意叫不醒——它就是那段「再給你跑一下」的
+	// 時間。睡滿還沒跑完就焚毀環境，那件 job 以環境層失敗回寫、站台端會另派一台重跑。
+	let stopGrace: TimeInterval = .init(run.stopGrace)
 	let loop: JobPollingLoop = .init(
 		backend: backend,
 		configuration: .init(host: run.host, runnerToken: runnerToken, image: run.image),
 		wait: { seconds in await stopSignal.wait(seconds) },
-		requestScope: { request in try await stopSignal.cancelWhenStopped(request) }
+		requestScope: { request in try await stopSignal.cancelWhenStopped(request) },
+		abortRunningJob: {
+			await stopSignal.untilStopped()
+			try? await Task.sleep(for: .seconds(stopGrace))
+		}
 	)
 	let sources: [any DispatchSourceSignal] = installStopHandlers { stopSignal.stop() }
 	// 站台位址只印 scheme／host／port：`--host` 收得下 `https://oauth2:<token>@…` 這種形狀，
 	// 原樣印出等於把憑證寫進行程的第一行 stdout。
 	let safeHost: String = GitLabAPIError.safeLocation(of: run.host)
-	logger.info("polling \(safeHost) guest=\(run.os.rawValue) image=\(run.golden)")
+	logger.info("polling \(safeHost) guest=\(run.os.rawValue) image=\(run.golden) stopGrace=\(run.stopGrace)")
 	await loop.run(
 		stopAfterFirstJob: run.once,
 		isStopped: { stopSignal.isStopped },

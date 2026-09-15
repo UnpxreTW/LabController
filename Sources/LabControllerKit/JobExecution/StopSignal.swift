@@ -97,10 +97,69 @@ public final class StopSignal: Sendable {
 		return try await withTaskCancellationHandler { try await work.value } onCancel: { work.cancel() }
 	}
 
+	/// 等到被喊停為止。
+	///
+	/// 給看門那種「平常什麼都不做、喊停才開始算帳」的工作用：停止寬限要從喊停那一刻起算，而
+	/// ``wait(_:)`` 喊停之後一秒都不等、當不了計時器。
+	///
+	/// - Important: 已經喊過停就立刻回來；呼叫端自己被取消時同樣回來——看門在工作正常跑完時
+	///   會被取消，那時它要醒得過來才撤得掉。
+	///
+	/// - Note: 回來只代表「已經喊過停」，不代表任何清理做完了；接下來要做什麼由呼叫端決定。
+	public func untilStopped() async {
+		guard !isStopped else { return }
+		let identifier: UUID = .init()
+		let waiter: Mutex<Waiter> = .init(.init())
+		// 喊停與呼叫端取消都按這一支，且只按得下一次——兩邊同時到的話，第二次拿到的是 nil。
+		let wake: @Sendable () -> Void = {
+			let pending: CheckedContinuation<Void, Never>? = waiter.withLock { waiter in
+				guard !waiter.isFinished else { return nil }
+				waiter.isFinished = true
+				defer { waiter.continuation = nil }
+				return waiter.continuation
+			}
+			pending?.resume()
+		}
+		await withTaskCancellationHandler {
+			await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+				// 進到這裡之前就被取消的話 `wake()` 已經跑過、那時還沒有接續可按；存放接續與重問
+				// 旗標都在鎖內，醒不過來的那個縫才不存在。
+				let finishedAlready: Bool = waiter.withLock { waiter in
+					guard !waiter.isFinished else { return true }
+					waiter.continuation = continuation
+					return false
+				}
+				guard !finishedAlready else {
+					continuation.resume()
+					return
+				}
+				let stoppedMeanwhile: Bool = state.withLock { state in
+					guard !state.isStopped else { return true }
+					state.cancellations[identifier] = wake
+					return false
+				}
+				if stoppedMeanwhile { wake() }
+			}
+		} onCancel: {
+			wake()
+		}
+		state.withLock { $0.cancellations[identifier] = nil }
+	}
+
 	/// 建立一支尚未被喊停的訊號。
 	public init() {}
 
 	// MARK: Private
+
+	/// ``untilStopped()`` 的等待狀態；接續只按得下一次。
+	private struct Waiter {
+
+		/// 停在等待裡的接續；還沒停進去時為 nil。
+		internal var continuation: CheckedContinuation<Void, Never>?
+
+		/// 已經按下過（喊停或呼叫端取消）；再按一次即無效。
+		internal var isFinished: Bool = false
+	}
 
 	/// 旗標與此刻登記在案的等待。
 	private struct State {

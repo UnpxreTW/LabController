@@ -80,6 +80,16 @@ public struct RunCommand: ParsableCommand {
 	@Flag(help: "Exit after one job has been handled instead of polling forever.")
 	public var once: Bool = false
 
+	/// 收到停止訊號之後，還在跑的那件 job 有多久可以自己跑完，秒。
+	///
+	/// 寬限用完即焚毀那台 guest，該件 job 以環境層失敗回寫站台——站台端把它讀作可重試，於是
+	/// 那件工作會被重新派給別人，而不是掛在執行中直到站台自己判死。
+	///
+	/// 服務管理器給的收工寬限要設得比這個值長：短於它的話，行程還在寬限之內就被強殺，回寫一樣
+	/// 送不出去，這段寬限等於白給。
+	@Option(help: "Seconds a running job may keep going after a stop signal before its guest is aborted.")
+	public var stopGrace: Int = 30
+
 	/// 紀錄門檻（`--log-level`；未給時看 `LOG_LEVEL`）。
 	@OptionGroup
 	public var logging: LoggingOptions

@@ -116,6 +116,61 @@ private final class StopSignalTests {
 		#expect(signal.isStopped)
 	}
 
+	/// 喊停之後才等的話一秒都不等：寬限要從喊停那一刻起算，早到的等待不能白等一輪。
+	@Test
+	private func `returns at once from untilStopped when already stopped`() async {
+		let signal: StopSignal = .init()
+		signal.stop()
+		let startedAt: Date = .init()
+		await signal.untilStopped()
+		#expect(Date().timeIntervalSince(startedAt) < wakeUpBudget)
+	}
+
+	/// 等在那裡的看門會被喊停叫醒。
+	@Test
+	private func `wakes untilStopped when stop arrives`() async throws {
+		let signal: StopSignal = .init()
+		let startedAt: Date = .init()
+		let watching: Task<Void, Never> = .init { await signal.untilStopped() }
+		// 讓上面那顆真的停進等待裡，喊停才是「途中」而不是「開始前」。
+		try await Task.sleep(for: .milliseconds(50))
+		signal.stop()
+		await watching.value
+		#expect(Date().timeIntervalSince(startedAt) < wakeUpBudget)
+	}
+
+	/// 沒被喊停就不回來：看門等的是喊停，不是每次呼叫都當場放行。
+	///
+	/// 這一條立著，寬限才有意義——看門一被呼叫就回來的話，每件 job 一開跑就被判逾時。
+	@Test
+	private func `keeps waiting in untilStopped while nobody has called stop`() async throws {
+		let signal: StopSignal = .init()
+		let finished: Mutex<Bool> = .init(false)
+		let watching: Task<Void, Never> = .init {
+			await signal.untilStopped()
+			finished.withLock { $0 = true }
+		}
+		try await Task.sleep(for: .milliseconds(100))
+		#expect(!finished.withLock { $0 })
+		signal.stop()
+		await watching.value
+		#expect(finished.withLock { $0 })
+	}
+
+	/// 呼叫端被取消時看門也要醒：job 正常跑完時撤看門走的就是這條，醒不過來就撤不掉。
+	@Test
+	private func `wakes untilStopped when the caller itself is cancelled`() async throws {
+		let signal: StopSignal = .init()
+		let startedAt: Date = .init()
+		let watching: Task<Void, Never> = .init { await signal.untilStopped() }
+		try await Task.sleep(for: .milliseconds(50))
+		watching.cancel()
+		await watching.value
+		#expect(Date().timeIntervalSince(startedAt) < wakeUpBudget)
+		// 取消的是呼叫端、不是喊停：旗標照舊沒翻。
+		#expect(!signal.isStopped)
+	}
+
 	/// 旗標一開始是關的，喊停後翻起來，重複喊停不出事。
 	@Test
 	private func `flips the flag and tolerates repeated stops`() {

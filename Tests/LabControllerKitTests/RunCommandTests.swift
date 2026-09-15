@@ -37,6 +37,21 @@ private final class RunCommandTests {
 		#expect(run.image == .alias("golden-xcode"))
 	}
 
+	/// 停止寬限未給時有預設值、給了就原樣收下。
+	///
+	/// 預設值不是零：零等於喊停當下就焚毀環境，那件本來再兩秒就跑完的 job 白白重跑一次。
+	@Test
+	private func `run takes a stop grace with a default`() throws {
+		let fallback: RunCommand = try #require(
+			try LabControllerCommand.parseAsRoot(minimalArguments) as? RunCommand
+		)
+		#expect(fallback.stopGrace == 30)
+		let explicit: RunCommand = try #require(
+			try LabControllerCommand.parseAsRoot(minimalArguments + ["--stop-grace", "5"]) as? RunCommand
+		)
+		#expect(explicit.stopGrace == 5)
+	}
+
 	/// 資源旗標未給時回落 `NymphBackendConfiguration` 的預設值。
 	@Test
 	private func `run falls back to the backend defaults`() throws {

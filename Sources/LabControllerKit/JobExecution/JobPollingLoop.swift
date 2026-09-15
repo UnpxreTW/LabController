@@ -177,7 +177,8 @@ public struct JobPollingLoop: Sendable {
 			let delivery: JobReportDelivery = try await deliver(Self.report(of: rejection), to: target, of: job.id)
 			return .init(disposition: .refused(jobIdentifier: job.id, delivery: delivery), cursor: result.lastUpdate)
 		case let .accepted(plan):
-			let runner: JobRunner = .init(backend: backend, configuration: configuration.runner)
+			let runner: JobRunner = .init(backend: backend, configuration: configuration.runner,
+			                              abortAfterStop: abortRunningJob)
 			let report: JobRunReport = await runner.run(plan, on: configuration.image)
 			let delivery: JobReportDelivery = try await deliver(report, to: target, of: job.id)
 			return .init(
@@ -203,9 +204,11 @@ public struct JobPollingLoop: Sendable {
 	///   連線 hold 多久由站台端決定，不打斷就得等回應自己回來。兩者沒注入時各自退回預設的
 	///   ``sleep(_:)`` 與 ``requestDirectly(_:)``、只能等。
 	///
-	/// - Important: 跑到一半的 job 照樣跑完並回寫——從中間丟下會留下一台沒人收的 guest，以及站台
-	///   端一件永遠停在執行中的 job，故取消的範圍收在領件那一段之內（見 ``poll(cursor:)``）。回寫
-	///   重送前的等待走另一支 ``resendWait``、同樣不受喊停影響，理由見 ``deliver(_:to:of:)``。
+	/// - Important: 跑到一半的 job 不被取消——從中間丟下會留下一台沒人收的 guest，以及站台端一件
+	///   永遠停在執行中的 job，故取消的範圍收在領件那一段之內（見 ``poll(cursor:)``）。給了
+	///   `abortRunningJob` 時它有一段寬限可以自己跑完，逾時則焚毀環境、以環境層失敗回寫（見
+	///   ``JobRunner``）。回寫重送前的等待走另一支 ``resendWait``、同樣不受喊停影響，理由見
+	///   ``deliver(_:to:of:)``。
 	///
 	/// - Note: 打斷領件拋回來的取消不記成故障——喊停後迴圈就地收工，不寫 `poll failed`、也不再
 	///   退避一輪。
@@ -272,6 +275,8 @@ public struct JobPollingLoop: Sendable {
 	///   - wait: 兩輪之間退避時等待的方式；預設真的睡指定秒數。
 	///   - resendWait: 回寫重送前等待的方式；預設真的睡指定秒數。
 	///   - requestScope: 領件那一段跑在什麼範圍裡；預設直接跑、打不斷。
+	///   - abortRunningJob: 收到停止訊號、寬限也用完時才回來的等待；預設不給，執行中的 job 跑
+	///     多久就等多久。
 	public init(
 		client: JobRequestClient = .init(),
 		backend: any ExecutionBackend,
@@ -281,7 +286,8 @@ public struct JobPollingLoop: Sendable {
 		resendWait: @escaping @Sendable (TimeInterval) async -> Void = JobPollingLoop.sleep,
 		requestScope: @escaping @Sendable (
 			@escaping @Sendable () async throws -> JobRequestResult
-		) async throws -> JobRequestResult = JobPollingLoop.requestDirectly
+		) async throws -> JobRequestResult = JobPollingLoop.requestDirectly,
+		abortRunningJob: (@Sendable () async -> Void)? = nil
 	) {
 		self.client = client
 		self.backend = backend
@@ -290,6 +296,7 @@ public struct JobPollingLoop: Sendable {
 		self.wait = wait
 		self.resendWait = resendWait
 		self.requestScope = requestScope
+		self.abortRunningJob = abortRunningJob
 	}
 
 	// MARK: Private
@@ -342,6 +349,13 @@ public struct JobPollingLoop: Sendable {
 	private let requestScope: @Sendable (
 		@escaping @Sendable () async throws -> JobRequestResult
 	) async throws -> JobRequestResult
+
+	/// 執行中的 job 在收到停止訊號之後還有多久可以自己跑完；等待回來即焚毀環境。
+	///
+	/// - Important: 與 ``requestScope`` 的取消互不相干——那一支打斷的是還沒領到東西的等待，
+	///   這一支處理的是已經領到、跑到一半的 job：結果照樣回寫得出去（環境層失敗），只是不再等
+	///   它自己跑完。nil ＝ 不設寬限。
+	private let abortRunningJob: (@Sendable () async -> Void)?
 
 	/// 把一份結果送回站台；第一次送不出去就退開一段再送一次。
 	///
