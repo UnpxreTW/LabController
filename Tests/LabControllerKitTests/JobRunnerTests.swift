@@ -43,6 +43,50 @@ private final class JobRunnerTests {
 		#expect(try await backend.ps().isEmpty)
 	}
 
+	/// 停止寬限用完時焚毀環境，那件 job 以環境層失敗收場——站台端讀得懂、會另派一台重跑。
+	@Test
+	private func `aborts the guest when the stop grace runs out`() async throws {
+		let backend: BlockingExecutionBackend = .init()
+		let plan: JobPlan = .init(
+			jobIdentifier: 1,
+			git: git,
+			steps: [.init(name: "script", script: ["swift build"])],
+			timeoutSeconds: 600
+		)
+		// 寬限的定義由測試給：命令一送進環境就算用完，不靠睡也不靠真的取消。
+		let runner: JobRunner = .init(backend: backend, abortAfterStop: { await backend.untilFirstCommand() })
+		let report: JobRunReport = await runner.run(plan, on: image)
+		#expect(report.outcome == .systemFailed)
+		#expect(report.failureReason == .runnerSystemFailure)
+		#expect(report.trace.contains("執行環境已焚毀"))
+		// 環境真的被收掉了：這件事不能只寫在結果裡，不然留下來的是一台沒人收的 guest。
+		#expect(backend.inner.destroyCount >= 1)
+		#expect(try await backend.ps().isEmpty)
+		// 停住的那道命令要放掉，否則它會留到整個測試行程結束。
+		backend.release()
+	}
+
+	/// job 在寬限之內跑完時，看門一步都不動：環境照正常路徑焚毀一次，結果也不被改寫。
+	@Test
+	private func `leaves a job that finishes within the grace untouched`() async throws {
+		let backend: InMemoryExecutionBackend = .init()
+		let plan: JobPlan = .init(
+			jobIdentifier: 1,
+			steps: [.init(name: "script", script: ["swift build"])],
+			timeoutSeconds: 600
+		)
+		// 這道閘不開＝寬限永遠沒用完，看門於是從頭到尾停在等待裡。
+		let grace: TestGate = .init()
+		let runner: JobRunner = .init(backend: backend, abortAfterStop: { await grace.wait() })
+		let report: JobRunReport = await runner.run(plan, on: image)
+		#expect(report.outcome == .completed)
+		#expect(report.exitCode == 0)
+		#expect(backend.destroyCount == 1)
+		#expect(try await backend.ps().isEmpty)
+		// 放掉停在等待裡的看門，理由同上一條。
+		grace.open()
+	}
+
 	/// 跑的是鋪好的腳本、而不是由本側拼出來的命令列。
 	@Test
 	private func `runs the rendered scripts through the configured shell`() async {

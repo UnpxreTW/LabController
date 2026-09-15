@@ -7,6 +7,7 @@
 //  SPDX-License-Identifier: Apache-2.0
 
 import Foundation
+import Synchronization
 
 /// 把一份消化過的 payload 在一個一次性執行環境裡跑完，回報怎麼收的。
 ///
@@ -59,8 +60,8 @@ public struct JobRunner: Sendable {
 		let finished: FinishedRun = .init()
 		do {
 			return try await backend.withGuest(specification) { guest in
-				let report: JobRunReport = try await execute(plan, in: workspace, on: guest, before: deadline,
-				                                             recording: trace)
+				let report: JobRunReport = try await runOrAbort(plan, in: workspace, on: guest, before: deadline,
+				                                                recording: trace)
 				finished.report = report
 				return report
 			}
@@ -83,14 +84,17 @@ public struct JobRunner: Sendable {
 	/// - Parameters:
 	///   - backend: 執行後端。
 	///   - configuration: 本機設定。
+	///   - abortAfterStop: 收到停止訊號、寬限也用完時才回來的等待；不給即不設寬限。
 	///   - now: 取當下時刻的方式。
 	public init(
 		backend: any ExecutionBackend,
 		configuration: JobRunnerConfiguration = .init(),
+		abortAfterStop: (@Sendable () async -> Void)? = nil,
 		now: @escaping @Sendable () -> Date = Date.init
 	) {
 		self.backend = backend
 		self.configuration = configuration
+		self.abortAfterStop = abortAfterStop
 		self.now = now
 	}
 
@@ -101,17 +105,19 @@ public struct JobRunner: Sendable {
 	/// 做成參考型別是因為它要跨越 ``ExecutionBackend/withGuest(_:do:)`` 的閉包邊界——工作在
 	/// 裡面寫、收拾之後在外面還要再寫一行，兩邊必須是同一份，否則環境開不起來時那一段說明
 	/// 會連同抄本一起消失。
-	private final class TraceRecorder {
+	private final class TraceRecorder: Sendable {
 
 		/// 以遮蔽規則建立。
 		init(masker: TraceMasker) {
-			self.stream = .init(masker: masker)
+			self.state = .init(.init(stream: .init(masker: masker)))
 		}
 
 		/// 寫一行；空字串不寫，免得 trace 裡多出成排的空行。
 		func write(_ line: String) {
 			guard !line.isEmpty else { return }
-			released += stream.append(line + "\n")
+			state.withLock { state in
+				state.released += state.stream.append(line + "\n")
+			}
 		}
 
 		/// 收攏並取回全文；緩衝區裡押著的尾巴在此放行。
@@ -119,15 +125,27 @@ public struct JobRunner: Sendable {
 		/// 放行的內容併回已放行的那份，所以收攏之後還能再寫、再收一次——收拾階段還要補一行的
 		/// 那條路徑走的就是這個。
 		func finish() -> String {
-			released += stream.flush()
-			return released
+			state.withLock { state in
+				state.released += state.stream.flush()
+				return state.released
+			}
 		}
 
-		/// 跨段遮蔽的緩衝器。
-		private var stream: MaskedTraceStream
+		/// 緩衝器與已放行的內容。
+		///
+		/// 上鎖是因為寬限那條路徑會讓兩邊同時寫：寬限到期時 ``JobRunner`` 就地收尾並補一行，而
+		/// 被放手的那段工作仍在環境裡跑、跑完還會再寫幾行。
+		private struct State {
 
-		/// 已放行的內容。
-		private var released: String = ""
+			/// 跨段遮蔽的緩衝器。
+			internal var stream: MaskedTraceStream
+
+			/// 已放行的內容。
+			internal var released: String = ""
+		}
+
+		/// 受鎖保護的內部狀態。
+		private let state: Mutex<State>
 
 	}
 
@@ -142,8 +160,124 @@ public struct JobRunner: Sendable {
 		var report: JobRunReport?
 	}
 
+	/// 誰先到算誰的等待點：工作自己跑到底、與停止寬限用完，第一個交進來的結果算數。
+	///
+	/// 不用 task group 收這場競賽——離開 group 之前要等全部子任務結束，而送進環境的那道命令不吃
+	/// Task 取消，等於沒有寬限。
+	private final class RunRace: Sendable {
+
+		/// 這一場的兩種收法。
+		internal enum Outcome {
+
+			/// 工作自己跑到底，不論成敗。
+			case ranToEnd
+
+			/// 寬限用完，環境已焚毀。
+			case aborted
+		}
+
+		/// 交一個結果進來；第一個算數，其餘丟棄。
+		internal func settle(_ outcome: Outcome) {
+			let pending: CheckedContinuation<Outcome, Never>? = state.withLock { state in
+				guard state.outcome == nil else { return nil }
+				state.outcome = outcome
+				defer { state.continuation = nil }
+				return state.continuation
+			}
+			pending?.resume(returning: outcome)
+		}
+
+		/// 等第一個結果；已經有結果就立刻回來。
+		internal func outcome() async -> Outcome {
+			await withCheckedContinuation { (continuation: CheckedContinuation<Outcome, Never>) in
+				let settled: Outcome? = state.withLock { state in
+					guard let outcome: Outcome = state.outcome else {
+						state.continuation = continuation
+						return nil
+					}
+					return outcome
+				}
+				if let settled { continuation.resume(returning: settled) }
+			}
+		}
+
+		/// 這一場的狀態。
+		private struct State {
+
+			/// 第一個交進來的結果；還沒有人交進來時為 nil。
+			internal var outcome: Outcome?
+
+			/// 停在 ``outcome()`` 裡的接續。
+			internal var continuation: CheckedContinuation<Outcome, Never>?
+		}
+
+		/// 受鎖保護的內部狀態。
+		private let state: Mutex<State> = .init(.init())
+
+	}
+
+	/// 收到停止訊號、寬限也用完時才回來的等待；nil ＝ 不設寬限，job 跑多久就等多久。
+	///
+	/// - Important: 只在 job 執行中有意義——環境開好之後才開始看，環境還沒開起來的那一段不算在
+	///   寬限裡。job 自己的時間上限走的是另一條（見 ``JobPlan/timeoutSeconds``）。
+	private let abortAfterStop: (@Sendable () async -> Void)?
+
 	/// 取當下時刻；測試靠它推時鐘，正式路徑取系統時間。
 	private let now: @Sendable () -> Date
+
+	/// 跑完這件 job，或在停止寬限用完時就地放手。
+	///
+	/// - Important: 寬限到期時**不等那段已經送進環境的命令**——``ExecutionBackend/exec(_:in:)``
+	///   送進去之後不吃 Task 取消，等它回來等於沒有寬限。焚毀環境之後就地回一份環境層失敗的結果，
+	///   那件 job 因此仍回寫得出去、行程也退得了。
+	///
+	/// - Note: 沒注入 `abortAfterStop` 時整段退化成直接跑，一顆多餘的 Task 都不開。
+	///
+	/// - Parameters:
+	///   - plan: 消化過的 payload。
+	///   - workspace: 已鋪好的檔案樹。
+	///   - guest: 已經開好的環境。
+	///   - deadline: 這件 job 的時間上限。
+	///   - trace: 抄本。
+	/// - Returns: 這次的結果；寬限到期時為環境層失敗。
+	/// - Throws: ``ExecutionBackendError``，同 ``execute(_:in:on:before:recording:)``。
+	private func runOrAbort(
+		_ plan: JobPlan,
+		in workspace: JobWorkspace,
+		on guest: GuestIdentifier,
+		before deadline: Date,
+		recording trace: TraceRecorder
+	) async throws -> JobRunReport {
+		guard let abortAfterStop: @Sendable () async -> Void = abortAfterStop else {
+			return try await execute(plan, in: workspace, on: guest, before: deadline, recording: trace)
+		}
+		let race: RunRace = .init()
+		let work: Task<JobRunReport, any Error> = .init {
+			try await execute(plan, in: workspace, on: guest, before: deadline, recording: trace)
+		}
+		let finishing: Task<Void, Never> = .init {
+			_ = try? await work.value
+			race.settle(.ranToEnd)
+		}
+		let watchdog: Task<Void, Never> = .init {
+			await abortAfterStop()
+			guard !Task.isCancelled else { return }
+			// 焚毀失敗也照樣放手：留下來的環境在 `ps()` 上看得到，而繼續等下去只會等到被強殺。
+			try? await backend.destroy(guest)
+			race.settle(.aborted)
+		}
+		defer {
+			watchdog.cancel()
+			finishing.cancel()
+		}
+		switch await race.outcome() {
+		case .ranToEnd:
+			return try await work.value
+		case .aborted:
+			trace.write("收到停止訊號後，這件 job 在寬限之內沒有跑完，執行環境已焚毀。")
+			return report(plan, outcome: .systemFailed, reason: .runnerSystemFailure, exitCode: nil, trace: trace)
+		}
+	}
 
 	/// 在已開好的環境裡取碼並逐步驟跑。
 	///

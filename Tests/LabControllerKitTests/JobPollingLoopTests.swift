@@ -556,6 +556,34 @@ private final class JobPollingLoopStopTests {
 		#expect(transport.requests.withLock { $0.count } > 1)
 	}
 
+	/// 執行中的 job 撐過停止寬限時，環境被焚毀、那件 job 的終態照樣回寫得出去。
+	///
+	/// 這一條釘的是接線：寬限那支等待要真的傳到跑 job 的那一層去，不然旗標翻了也沒人收。
+	@Test
+	private func `aborts a running job once the stop grace runs out`() async throws {
+		let transport: ScriptedPollTransport = .init([.respond(assignedJob), .respond(.init(statusCode: 200))])
+		let backend: BlockingExecutionBackend = .init()
+		let loop: JobPollingLoop = .init(
+			client: .init(transport: transport),
+			backend: backend,
+			reporter: .init(client: .init(transport: transport), wait: { _ in }),
+			configuration: configuration,
+			abortRunningJob: { await backend.untilFirstCommand() }
+		)
+		let cycle: JobCycle = try await loop.poll(cursor: nil)
+		guard case let .handled(jobIdentifier, outcome, delivery) = cycle.disposition else {
+			Issue.record("這一輪應該收下並經手了那件 job")
+			backend.release()
+			return
+		}
+		#expect(jobIdentifier == 7)
+		#expect(outcome == .systemFailed)
+		// 回寫留在寬限之外：終態送不回站台的話，那件 job 會一路掛到站台自己判死。
+		#expect(delivery.acceptance == .written)
+		#expect(backend.inner.destroyCount >= 1)
+		backend.release()
+	}
+
 	/// 領件被喊停打斷時就地收工，不記成故障、也不再退避一輪。
 	///
 	/// 打斷回來的是取消類錯誤，寫成 `poll failed` 會讓每次正常停止都在紀錄裡留一行假錯誤；
