@@ -7,6 +7,7 @@
 //  SPDX-License-Identifier: Apache-2.0
 
 import Foundation
+import Logging
 import Synchronization
 
 /// 把一份消化過的 payload 在一個一次性執行環境裡跑完，回報怎麼收的。
@@ -21,6 +22,15 @@ import Synchronization
 /// 連帶的一個缺口一併寫明：**逾時之後連 `when: always` 的收拾步驟也不跑**——那類步驟要有
 /// 意義就得自帶一份不受本次預算約束的時間，而「另給一份預算」正是看門線那一片要一起決定的
 /// 事。在它到位之前，這裡寧可誠實地不跑，也不要給一個沒有盡頭的收拾階段。
+///
+/// **紀錄與 trace 是兩份、寫的東西也不同**：trace 是要交回站台的那一份，逐行帶著 job 自己的
+/// 輸出；紀錄留在跑這件 job 的機器上，只寫這一層自身的狀態——環境開不起來、環境焚毀不掉、
+/// 寬限用完把環境收掉。這幾件事在 trace 裡也有，但 trace 送不回站台的那一刻就一起消失，而
+/// 那正是最需要在機器上查得到的時候。
+///
+/// - Important: 紀錄行一律不帶變數值、命令與命令輸出；錯誤一律經
+///   ``GitLabAPIError/safeDescription(of:)`` 收斂，收斂後仍可能內插 payload 帶進來的字串
+///   （例如變數名），因此再經 ``JobPlan/masker`` 遮蔽一次才寫。
 public struct JobRunner: Sendable {
 
 	// MARK: Public
@@ -49,6 +59,12 @@ public struct JobRunner: Sendable {
 			// 錯誤訊息內插的是變數名而不是值，但仍走遮蔽通道——「這條路徑上應該沒有秘密」
 			// 是一種會過期的推論，而過期的那一次就是秘密上站台的那一次。
 			trace.write("執行環境的檔案準備不起來：\(error)")
+			logger.error(
+				"""
+				job \(plan.jobIdentifier) workspace unusable: \
+				\(plan.masker.mask(GitLabAPIError.safeDescription(of: error)))
+				"""
+			)
 			return .init(outcome: .systemFailed, failureReason: .runnerSystemFailure, trace: trace.finish(),
 			             warnings: plan.warnings)
 		}
@@ -68,12 +84,26 @@ public struct JobRunner: Sendable {
 		} catch {
 			guard let report: JobRunReport = finished.report else {
 				trace.write("執行環境沒能把事情做成：\(error)")
+				logger.error(
+					"""
+					job \(plan.jobIdentifier) execution environment failed: \
+					\(plan.masker.mask(GitLabAPIError.safeDescription(of: error)))
+					"""
+				)
 				return .init(outcome: .systemFailed, failureReason: .runnerSystemFailure, trace: trace.finish(),
 				             warnings: plan.warnings)
 			}
 			// 收拾失敗不改寫結果，但也不吞掉：留下來的環境仍在 `ps()` 上看得到，回收孤兒
 			// 本來就是後端那一側的事（見 `ExecutionBackend.withGuest` 的說明）。
 			trace.write("環境沒能焚毀：\(error)")
+			// 留下來的環境佔著那台機器的資源，而站台端看到的是一件正常收掉的 job ⇒ 只有這一行
+			// 會指出「有東西沒收乾淨」。
+			logger.error(
+				"""
+				job \(plan.jobIdentifier) guest could not be destroyed: \
+				\(plan.masker.mask(GitLabAPIError.safeDescription(of: error)))
+				"""
+			)
 			return .init(outcome: report.outcome, failureReason: report.failureReason, exitCode: report.exitCode,
 			             trace: trace.finish(), warnings: report.warnings)
 		}
@@ -85,16 +115,19 @@ public struct JobRunner: Sendable {
 	///   - backend: 執行後端。
 	///   - configuration: 本機設定。
 	///   - abortAfterStop: 收到停止訊號、寬限也用完時才回來的等待；不給即不設寬限。
+	///   - logger: 紀錄出口；不給即取行程裝上的那一份。這一層只送出紀錄、不決定它們寫去哪裡。
 	///   - now: 取當下時刻的方式。
 	public init(
 		backend: any ExecutionBackend,
 		configuration: JobRunnerConfiguration = .init(),
 		abortAfterStop: (@Sendable () async -> Void)? = nil,
+		logger: Logger = .init(label: "lab-controller"),
 		now: @escaping @Sendable () -> Date = Date.init
 	) {
 		self.backend = backend
 		self.configuration = configuration
 		self.abortAfterStop = abortAfterStop
+		self.logger = logger
 		self.now = now
 	}
 
@@ -222,6 +255,9 @@ public struct JobRunner: Sendable {
 	///   寬限裡。job 自己的時間上限走的是另一條（見 ``JobPlan/timeoutSeconds``）。
 	private let abortAfterStop: (@Sendable () async -> Void)?
 
+	/// 這一層的紀錄出口；寫的內容與界線見型別說明。
+	private let logger: Logger
+
 	/// 取當下時刻；測試靠它推時鐘，正式路徑取系統時間。
 	private let now: @Sendable () -> Date
 
@@ -275,6 +311,9 @@ public struct JobRunner: Sendable {
 			return try await work.value
 		case .aborted:
 			trace.write("收到停止訊號後，這件 job 在寬限之內沒有跑完，執行環境已焚毀。")
+			// 帶上環境識別碼：這一行要跟開環境那一側自己的紀錄對得起來，事後才查得出那台被收掉的
+			// 環境是哪一台。
+			logger.warning("job \(plan.jobIdentifier) exceeded the stop grace; destroyed guest \(guest)")
 			return report(plan, outcome: .systemFailed, reason: .runnerSystemFailure, exitCode: nil, trace: trace)
 		}
 	}
@@ -298,6 +337,12 @@ public struct JobRunner: Sendable {
 				// 取不到碼算環境錯、不算 job 錯：CI 檔沒有任何一行跑過，紅在這裡不是它的責任，
 				// 而站台端對環境錯會重試——下一次多半就取得到了。
 				trace.write("取得程式碼失敗（結束碼 \(result.exitCode)），本次一個步驟都不跑。")
+				logger.warning(
+					"""
+					job \(plan.jobIdentifier) could not check out the code on guest \(guest); \
+					exit code \(result.exitCode)
+					"""
+				)
 				return report(plan, outcome: .systemFailed, reason: .runnerSystemFailure,
 				              exitCode: result.exitCode, trace: trace)
 			}

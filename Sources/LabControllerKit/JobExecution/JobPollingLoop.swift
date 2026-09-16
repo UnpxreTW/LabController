@@ -151,12 +151,15 @@ public struct JobPollingLoop: Sendable {
 
 	/// 領一件：領到就跑完並回寫，沒領到就只把游標帶回來。
 	///
-	/// - Parameter cursor: 上一輪帶回來的游標；第一輪給 nil。
+	/// - Parameters:
+	///   - cursor: 上一輪帶回來的游標；第一輪給 nil。
+	///   - logger: 往下交給 ``JobRunner`` 的紀錄出口；不給即取行程裝上的那一份。跑 job 那一層
+	///     自己會寫的行見 ``JobRunner``，這一層不重寫一次。
 	/// - Returns: 這一輪的處置與下一輪要帶的游標。
 	/// - Throws: 領件的連線層錯誤原樣拋出；回寫送不出去時拋 ``JobDeliveryFailure``（已重送過
 	///   一次），兩者分開才知道那件 job 有沒有被經手。**跑 job 本身不會拋**——跑不成也是一份
 	///   結果，照樣回寫給站台（見 ``JobRunner/run(_:on:)``）。
-	public func poll(cursor: String?) async throws -> JobCycle {
+	public func poll(cursor: String?, logger: Logger = .init(label: "lab-controller")) async throws -> JobCycle {
 		// 只有領件這一段包在可取消的範圍裡：跑 job 與回寫都在後面，那兩段被取消等於把一件
 		// 已經經手的 job 丟掉，站台端會看到它一路掛到自己判死。
 		let result: JobRequestResult = try await requestScope {
@@ -178,7 +181,7 @@ public struct JobPollingLoop: Sendable {
 			return .init(disposition: .refused(jobIdentifier: job.id, delivery: delivery), cursor: result.lastUpdate)
 		case let .accepted(plan):
 			let runner: JobRunner = .init(backend: backend, configuration: configuration.runner,
-			                              abortAfterStop: abortRunningJob)
+			                              abortAfterStop: abortRunningJob, logger: logger)
 			let report: JobRunReport = await runner.run(plan, on: configuration.image)
 			let delivery: JobReportDelivery = try await deliver(report, to: target, of: job.id)
 			return .init(
@@ -205,7 +208,7 @@ public struct JobPollingLoop: Sendable {
 	///   ``sleep(_:)`` 與 ``requestDirectly(_:)``、只能等。
 	///
 	/// - Important: 跑到一半的 job 不被取消——從中間丟下會留下一台沒人收的 guest，以及站台端一件
-	///   永遠停在執行中的 job，故取消的範圍收在領件那一段之內（見 ``poll(cursor:)``）。給了
+	///   永遠停在執行中的 job，故取消的範圍收在領件那一段之內（見 ``poll(cursor:logger:)``）。給了
 	///   `abortRunningJob` 時它有一段寬限可以自己跑完，逾時則焚毀環境、以環境層失敗回寫（見
 	///   ``JobRunner``）。回寫重送前的等待走另一支 ``resendWait``、同樣不受喊停影響，理由見
 	///   ``deliver(_:to:of:)``。
@@ -218,7 +221,8 @@ public struct JobPollingLoop: Sendable {
 	///   - stopAfterFirstJob: 經手完一件 job（含拒收）就結束。
 	///   - isStopped: 每一輪開始前問一次要不要停。
 	///   - logger: 一行一件事的紀錄出口；**這條路徑不帶任何 token**。這一層只送出紀錄、不決定
-	///     它們最後寫去哪裡，後端由組裝行程的那一端裝上。
+	///     它們最後寫去哪裡，後端由組裝行程的那一端裝上。同一份會往下交給 ``JobRunner``，跑 job
+	///     那一層的環境層事件因此與迴圈的行落在同一個出口。
 	public func run(
 		startingAt cursor: String? = nil,
 		stopAfterFirstJob: Bool,
@@ -229,7 +233,7 @@ public struct JobPollingLoop: Sendable {
 		while !isStopped() {
 			let cycle: JobCycle
 			do {
-				cycle = try await poll(cursor: currentCursor)
+				cycle = try await poll(cursor: currentCursor, logger: logger)
 			} catch let failure as JobDeliveryFailure {
 				// 回寫失敗與領件失敗的下一步相反：這件 job 已經被這台機器經手過，接著去領第二件
 				// 等於在同一台機器上疊工作，`--once` 也會失去「經手一件即收工」的意思。站台端那件
@@ -257,7 +261,7 @@ public struct JobPollingLoop: Sendable {
 			logger.info("\(Self.summary(of: cycle.disposition))")
 			if stopAfterFirstJob, cycle.didHandleJob { return }
 			// 這一輪沒有工作：退開再敲。站台 hold 住時這段等待只是把下一次敲門往後挪一點，
-			// 站台沒 hold 時它就是唯一擋住緊迴圈的東西——退避留在迴圈這一層，`poll(cursor:)`
+			// 站台沒 hold 時它就是唯一擋住緊迴圈的東西——退避留在迴圈這一層，`poll(cursor:logger:)`
 			// 維持「敲一次、把結果帶回來」不自己等待。
 			if case .idle = cycle.disposition {
 				await wait(configuration.retryInterval)
@@ -344,7 +348,7 @@ public struct JobPollingLoop: Sendable {
 	/// 領件那一段跑在什麼範圍裡；注入 ``StopSignal/cancelWhenStopped(_:)`` 即可讓喊停把在飛的
 	/// long-poll 直接打斷。
 	///
-	/// - Important: 範圍只框得住領件——跑 job 與回寫刻意留在外面，理由見 ``poll(cursor:)`` 內的
+	/// - Important: 範圍只框得住領件——跑 job 與回寫刻意留在外面，理由見 ``poll(cursor:logger:)`` 內的
 	///   註解。
 	private let requestScope: @Sendable (
 		@escaping @Sendable () async throws -> JobRequestResult

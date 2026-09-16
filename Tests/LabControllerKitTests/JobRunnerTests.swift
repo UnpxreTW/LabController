@@ -8,11 +8,27 @@
 
 import Foundation
 import LabControllerKit
+import Logging
+import Synchronization
 import Testing
 
 /// 以結束碼與標準輸出組一個結果；命令本身不影響斷言，故填佔位值。
 private func result(_ exitCode: Int32, output: String = "") -> CommandResult {
 	.init(command: ["scripted"], exitCode: exitCode, standardOutput: .init(output.utf8))
+}
+
+/// 從兩份平行收集的紀錄裡取出某一個等級的那幾行。
+///
+/// 收行的出口一次交出等級與內容兩樣，而測試要斷言的是「這個等級寫了哪幾行」；兩份各自收在自己
+/// 的鎖裡（與 ``JobPollingLoopTests`` 同形），在這裡才對起來。
+///
+/// - Parameters:
+///   - level: 要取哪一個等級。
+///   - levels: 依序收下的等級；由呼叫端先自鎖裡取出。
+///   - lines: 依序收下的內容；同上。
+/// - Returns: 該等級的那幾行，順序同寫出時。
+private func messages(at level: Logger.Level, of levels: [Logger.Level], _ lines: [String]) -> [String] {
+	zip(levels, lines).filter { $0.0 == level }.map(\.1)
 }
 
 // MARK: - JobRunnerTests
@@ -321,5 +337,70 @@ private final class JobRunnerTests {
 		let report: JobRunReport = await JobRunner(backend: backend).run(plan, on: image)
 		#expect(report.warnings == [.cache(count: 2)])
 		#expect(report.trace.contains("cache"))
+	}
+
+	/// 寬限用完把環境收掉時，機器上留得下一行：那件 job 的 trace 送不回站台的話，這是唯一的痕跡。
+	@Test
+	private func `writes a warning when the stop grace destroys the guest`() async {
+		let backend: BlockingExecutionBackend = .init()
+		let plan: JobPlan = .init(
+			jobIdentifier: 7,
+			steps: [.init(name: "script", script: ["swift build"])],
+			timeoutSeconds: 600
+		)
+		let lines: Mutex<[String]> = .init([])
+		let levels: Mutex<[Logger.Level]> = .init([])
+		let runner: JobRunner = .init(
+			backend: backend,
+			abortAfterStop: { await backend.untilFirstCommand() },
+			logger: CapturingLogHandler.logger { level, line in
+				lines.withLock { $0.append(line) }
+				levels.withLock { $0.append(level) }
+			}
+		)
+		_ = await runner.run(plan, on: image)
+		let warnings: [String] = messages(at: .warning, of: levels.withLock { $0 }, lines.withLock { $0 })
+		#expect(warnings.count == 1)
+		#expect(warnings.first?.contains("job 7 exceeded the stop grace") == true)
+		backend.release()
+	}
+
+	/// 環境焚毀不掉時走 error：站台端看到的是一件正常收掉的 job，只有這一行指得出有東西沒收乾淨。
+	@Test
+	private func `writes an error when the guest cannot be destroyed`() async {
+		let backend: InMemoryExecutionBackend = .init(script: .init(destroyError: .backendUnavailable(detail: "gone")))
+		let plan: JobPlan = .init(
+			jobIdentifier: 7,
+			steps: [.init(name: "script", script: ["swift build"])],
+			timeoutSeconds: 600
+		)
+		let lines: Mutex<[String]> = .init([])
+		let levels: Mutex<[Logger.Level]> = .init([])
+		let runner: JobRunner = .init(backend: backend, logger: CapturingLogHandler.logger { level, line in
+			lines.withLock { $0.append(line) }
+			levels.withLock { $0.append(level) }
+		})
+		_ = await runner.run(plan, on: image)
+		let errors: [String] = messages(at: .error, of: levels.withLock { $0 }, lines.withLock { $0 })
+		#expect(errors.count == 1)
+		#expect(errors.first?.contains("job 7 guest could not be destroyed") == true)
+	}
+
+	/// 一切正常時一行都不寫：這一層的紀錄是給出事的時候看的，正常跑完由迴圈那一層的一行帶過。
+	@Test
+	private func `stays quiet when a job runs to completion`() async {
+		let backend: InMemoryExecutionBackend = .init()
+		let plan: JobPlan = .init(
+			jobIdentifier: 7,
+			steps: [.init(name: "script", script: ["swift build"])],
+			timeoutSeconds: 600
+		)
+		let lines: Mutex<[String]> = .init([])
+		let runner: JobRunner = .init(backend: backend, logger: CapturingLogHandler.logger { _, line in
+			lines.withLock { $0.append(line) }
+		})
+		let report: JobRunReport = await runner.run(plan, on: image)
+		#expect(report.outcome == .completed)
+		#expect(lines.withLock { $0 }.isEmpty)
 	}
 }
