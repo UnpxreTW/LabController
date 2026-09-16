@@ -16,18 +16,18 @@
 /// socket 位置與後端原文留在本側日誌。
 public enum ExecutionBackendError: Error, Equatable, Sendable {
 
-    /// 沒有這個執行環境；已焚毀或從來不存在。
-    ///
-    /// 兩者刻意不分：後端一般不留已焚毀環境的墓碑，能分得出來的那一段也只在墓碑還在的期間內
-    /// 成立——寫成兩個 case 會讓呼叫端以為「不是已焚毀就是從沒開過」，而那個推論會過期。
-    case unknownGuest(GuestIdentifier)
+	/// 沒有這個執行環境；已焚毀或從來不存在。
+	///
+	/// 兩者刻意不分：後端一般不留已焚毀環境的墓碑，能分得出來的那一段也只在墓碑還在的期間內
+	/// 成立——寫成兩個 case 會讓呼叫端以為「不是已焚毀就是從沒開過」，而那個推論會過期。
+	case unknownGuest(GuestIdentifier)
 
-    /// 環境還在，但當下的狀態收不了命令。
-    case guestNotReady(GuestIdentifier, state: GuestState)
+	/// 環境還在，但當下的狀態收不了命令。
+	case guestNotReady(GuestIdentifier, state: GuestState)
 
-    /// 連不上後端，或後端回了讀不懂的東西；`detail` 是給本側日誌看的。
-    case backendUnavailable(detail: String)
+	/// 連不上後端，或後端回了讀不懂的東西；`detail` 是給本側日誌看的。
+	case backendUnavailable(detail: String)
 
-    /// 後端明確拒絕這次請求（基底找不到、容量不足、權限不足等）；`detail` 是給本側日誌看的。
-    case requestRejected(detail: String)
+	/// 後端明確拒絕這次請求（基底找不到、容量不足、權限不足等）；`detail` 是給本側日誌看的。
+	case requestRejected(detail: String)
 }
