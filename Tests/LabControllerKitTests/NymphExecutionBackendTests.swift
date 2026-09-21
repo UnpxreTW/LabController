@@ -192,7 +192,21 @@ private final class NymphExecutionBackendTests {
 		}
 	}
 
-	/// 對面拒絕的那幾則（基底不存在、額度滿了⋯）與「連不上」分開：重開一台有沒有用不一樣。
+	/// 「現在沒有餘裕」與「這個請求不成立」分開：前者等一等再問就開得起來，後者問幾次都一樣。
+	@Test
+	private func `separates a capacity shortage from a refused request`() async throws {
+		let denied: String = #"{"toolError":{"_0":{"code":"admission_denied","message":"no free slot"}}}"#
+		let backend: NymphExecutionBackend = .init(
+			transport: ScriptedNymphTransport([denied]), configuration: configuration
+		)
+		await #expect(throws: ExecutionBackendError.capacityUnavailable(
+			detail: "admission_denied：no free slot"
+		)) {
+			_ = try await backend.spawn(.init(image: .alias("x")))
+		}
+	}
+
+	/// 對面拒絕的那幾則（基底不存在、取碼失敗⋯）與「連不上」分開：重開一台有沒有用不一樣。
 	@Test
 	private func `separates a refused request from an unusable backend`() async throws {
 		let refused: String = #"{"toolError":{"_0":{"code":"golden_not_found","message":"golden alias not found: x"}}}"#

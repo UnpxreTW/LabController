@@ -210,7 +210,12 @@ public struct NymphExecutionBackend: ExecutionBackend {
 			}
 		}
 		switch error.code {
-		case "admission_denied", "golden_not_found", "clone_failed", "engine_unavailable", "not_apple_silicon":
+		case "admission_denied":
+			// 對面這則只表示「現在沒有餘裕」，而不是這個請求不成立：同一份規格晚一點再送多半
+			// 就開得起來，故與下面那幾則分開，呼叫端才有辦法等。
+			return .capacityUnavailable(detail: "\(error.code)：\(error.message)")
+
+		case "golden_not_found", "clone_failed", "engine_unavailable", "not_apple_silicon":
 			return .requestRejected(detail: "\(error.code)：\(error.message)")
 
 		default:
