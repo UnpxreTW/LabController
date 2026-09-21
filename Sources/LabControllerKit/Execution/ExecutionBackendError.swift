@@ -28,6 +28,14 @@ public enum ExecutionBackendError: Error, Equatable, Sendable {
 	/// 連不上後端，或後端回了讀不懂的東西；`detail` 是給本側日誌看的。
 	case backendUnavailable(detail: String)
 
-	/// 後端明確拒絕這次請求（基底找不到、容量不足、權限不足等）；`detail` 是給本側日誌看的。
+	/// 後端明確拒絕這次請求（基底找不到、權限不足等）；`detail` 是給本側日誌看的。
 	case requestRejected(detail: String)
+
+	/// 後端當下沒有餘裕開新的環境，晚一點可能就有；`detail` 是給本側日誌看的。
+	///
+	/// **與 ``requestRejected(detail:)`` 分開的是「再試一次有沒有意義」**：那一則講的是這個請求
+	/// 本身不成立（基底不存在、權限不足），再問幾次答案都一樣；這一則只跟當下有幾台在跑有關，
+	/// 而那是會變的。混在一起時，呼叫端要嘛把兩者都當場判死（容量滿就紅一件 job），要嘛都去
+	/// 重試（明知不成立的請求也一直問）——兩種都不對。
+	case capacityUnavailable(detail: String)
 }
