@@ -85,6 +85,25 @@ private final class RunCommandTests {
 		#expect(fallback.resolvedSocketPath.hasSuffix("nymph.sock"))
 	}
 
+	/// `--registry` 給了就用給的；沒給時回落到家目錄下那一份。
+	///
+	/// 這個旗標是「同一台機器跑兩份」的唯一解法：忽略它的話，兩份仍共用同一份登記簿，而操作者
+	/// 看到的只是第二份起不來。
+	@Test
+	private func `run resolves the registry path`() throws {
+		let explicit: any ParsableCommand = try LabControllerCommand.parseAsRoot(
+			minimalArguments + ["--registry", "/tmp/lab-controller-sessions.json"]
+		)
+		#expect(
+			try #require(explicit as? RunCommand).resolvedRegistryURL.path
+				== "/tmp/lab-controller-sessions.json"
+		)
+		let fallback: RunCommand = try #require(
+			try LabControllerCommand.parseAsRoot(minimalArguments) as? RunCommand
+		)
+		#expect(fallback.resolvedRegistryURL == GuestRegistry.defaultURL())
+	}
+
 	/// `--os` 是必填、且只收 nymph 認得的兩種；猜一個預設值等於在同名別名上靜默選錯引擎。
 	@Test
 	private func `run requires a guest kind it recognises`() {

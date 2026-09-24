@@ -53,6 +53,7 @@ lab-controller run \
 | `--golden` | 必填 | 每件 job 各複製一份的基底別名。 |
 | `--os` | 必填 | 要開哪一種環境：`mac` 或 `linux`。 |
 | `--socket` | nymph 自己算出來的路徑 | nymph socket 的路徑。 |
+| `--registry` | 家目錄下的 `.lab-controller/sessions.json` | 記錄本行程開出去哪些環境的檔案；重啟之後靠它回收上一輪留下的殘骸。同一台機器跑兩份時各給一份，並放在只有擁有者寫得進去的目錄下。 |
 | `--cpus` | `4` | 每台環境要幾顆 vCPU。 |
 | `--memory-gib` | `4` | 每台環境要多少記憶體，單位 GiB。 |
 | `--readiness-timeout` | `180` | 等一台剛開好的環境開始收命令的秒數。 |
