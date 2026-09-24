@@ -12,20 +12,6 @@ import Logging
 import Synchronization
 import Testing
 
-/// 從兩份平行收集的紀錄裡取出某一個等級的那幾行。
-///
-/// 與 ``JobRunnerTests`` 同形：收行的出口一次交出等級與內容兩樣，而測試要斷言的是「這個等級
-/// 寫了哪幾行」；兩份各自收在自己的鎖裡，在這裡才對起來。
-///
-/// - Parameters:
-///   - level: 要取哪一個等級。
-///   - levels: 依序收下的等級；由呼叫端先自鎖裡取出。
-///   - lines: 依序收下的內容；同上。
-/// - Returns: 該等級的那幾行，順序同寫出時。
-private func messages(at level: Logger.Level, of levels: [Logger.Level], _ lines: [String]) -> [String] {
-	zip(levels, lines).filter { $0.0 == level }.map(\.1)
-}
-
 // MARK: - JobRunnerCapacityTests
 
 /// 後端沒有餘裕時那條等待線；與 ``JobRunnerTests`` 分檔，兩邊各自看得完。
@@ -118,7 +104,7 @@ private final class JobRunnerCapacityTests {
 		#expect(report.outcome == .systemFailed)
 		#expect(report.failureReason == .runnerSystemFailure)
 		#expect(report.trace.contains("等容量的期間收到停止訊號"))
-		let warnings: [String] = messages(at: .warning, of: levels.withLock { $0 }, lines.withLock { $0 })
+		let warnings: [String] = messages(at: .warning, levels: levels.withLock { $0 }, lines: lines.withLock { $0 })
 		#expect(warnings.count == 1)
 		#expect(warnings.first?.contains("job 3 gave up waiting for capacity") == true)
 		#expect(inner.destroyCount == 0)
