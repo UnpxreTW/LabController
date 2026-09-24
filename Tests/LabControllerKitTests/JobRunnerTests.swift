@@ -17,20 +17,6 @@ private func result(_ exitCode: Int32, output: String = "") -> CommandResult {
 	.init(command: ["scripted"], exitCode: exitCode, standardOutput: .init(output.utf8))
 }
 
-/// 從兩份平行收集的紀錄裡取出某一個等級的那幾行。
-///
-/// 收行的出口一次交出等級與內容兩樣，而測試要斷言的是「這個等級寫了哪幾行」；兩份各自收在自己
-/// 的鎖裡（與 ``JobPollingLoopTests`` 同形），在這裡才對起來。
-///
-/// - Parameters:
-///   - level: 要取哪一個等級。
-///   - levels: 依序收下的等級；由呼叫端先自鎖裡取出。
-///   - lines: 依序收下的內容；同上。
-/// - Returns: 該等級的那幾行，順序同寫出時。
-private func messages(at level: Logger.Level, of levels: [Logger.Level], _ lines: [String]) -> [String] {
-	zip(levels, lines).filter { $0.0 == level }.map(\.1)
-}
-
 // MARK: - JobRunnerTests
 
 private final class JobRunnerTests {
@@ -359,7 +345,7 @@ private final class JobRunnerTests {
 			}
 		)
 		_ = await runner.run(plan, on: image)
-		let warnings: [String] = messages(at: .warning, of: levels.withLock { $0 }, lines.withLock { $0 })
+		let warnings: [String] = messages(at: .warning, levels: levels.withLock { $0 }, lines: lines.withLock { $0 })
 		#expect(warnings.count == 1)
 		#expect(warnings.first?.contains("job 7 exceeded the stop grace") == true)
 		backend.release()
@@ -381,7 +367,7 @@ private final class JobRunnerTests {
 			levels.withLock { $0.append(level) }
 		})
 		_ = await runner.run(plan, on: image)
-		let errors: [String] = messages(at: .error, of: levels.withLock { $0 }, lines.withLock { $0 })
+		let errors: [String] = messages(at: .error, levels: levels.withLock { $0 }, lines: lines.withLock { $0 })
 		#expect(errors.count == 1)
 		#expect(errors.first?.contains("job 7 guest could not be destroyed") == true)
 	}
