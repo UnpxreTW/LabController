@@ -288,6 +288,7 @@ private final class RegisteringExecutionBackendTests {
 		// 一起收掉——而那是一件正在跑的 job 的環境，不是上一輪的殘骸。
 		let reclamation: RegisteringExecutionBackend.Reclamation = await backend.reclaimOrphans(
 			attempts: 3,
+			// `try?`：等待閉包不能拋，登記寫不進去時下方的斷言會紅——不必在這裡再處理一次。
 			waitBeforeRetry: { _ in try? await registry.record(.init("live")) },
 			retryInterval: .zero
 		)
