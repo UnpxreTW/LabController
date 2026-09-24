@@ -7,6 +7,7 @@
 //  SPDX-License-Identifier: Apache-2.0
 
 import ArgumentParser
+import Foundation
 
 /// `run` 子命令的命令列引數；與根命令同一分層原則——本型別只負責解析與換算，
 /// 領件迴圈由 ``JobPollingLoop`` 跑、行程生命週期（訊號處理）留在可執行檔目標。
@@ -28,6 +29,11 @@ public struct RunCommand: ParsableCommand {
 	/// 實際要連的 socket 路徑：有給就用給的，沒給就照對面那份規則自己算。
 	public var resolvedSocketPath: String {
 		socket ?? UnixSocketNymphTransport.defaultSocketPath()
+	}
+
+	/// 登記簿檔案位置：有給就用給的，沒給就走 ``GuestRegistry/defaultURL(homeDirectory:)``。
+	public var resolvedRegistryURL: URL {
+		registry.map { URL(fileURLWithPath: $0) } ?? GuestRegistry.defaultURL()
 	}
 
 	/// 要從哪一份基底開環境。
@@ -53,6 +59,16 @@ public struct RunCommand: ParsableCommand {
 	/// 要開哪一種 guest；**必填、無預設**，理由見 ``NymphGuestKind``。
 	@Option(help: "Guest kind to spawn: mac or linux.")
 	public var os: NymphGuestKind
+
+	/// 記錄本行程開出去哪些執行環境的檔案路徑；未給時走家目錄下的預設位置。
+	///
+	/// - Important: 同一台機器上跑兩份時，兩份必須各自給一個檔。這份登記簿是回收殘骸的唯一
+	///   依據，共用同一份時，後起來的那一份會把另一份正在跑的環境當成上一輪的殘骸收掉。行程
+	///   啟動時會對它取一把獨佔鎖，取不到就當場結束——共用因此不會安靜地出錯。
+	/// - Warning: 放在只有擁有者寫得進去的目錄下。登記簿上的識別碼會被原樣拿去焚毀，別人寫
+	///   得進去就等於別人點得動這台機器上的環境。
+	@Option(help: "Path to the file recording this process's guests; keep it owner-writable only.")
+	public var registry: String?
 
 	/// nymph 的 socket 檔路徑；未給時由 ``UnixSocketNymphTransport/defaultSocketPath(environment:)`` 解出。
 	@Option(help: "Path to the nymph socket; defaults to the location nymph itself computes.")

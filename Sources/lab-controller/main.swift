@@ -122,10 +122,41 @@ if let run: RunCommand = parsedCommand as? RunCommand {
 		logger.error("token file unusable: \(GitLabAPIError.safeDescription(of: error))")
 		exit(1)
 	}
-	let backend: NymphExecutionBackend = .init(
-		transport: UnixSocketNymphTransport(socketPath: run.resolvedSocketPath),
-		configuration: run.backendConfiguration
+	// 登記簿先上鎖再用：取不到鎖表示另一份 lab-controller 正用著同一個檔，而那一份手上多半有
+	// 正在跑的環境——照樣開工等於把它的環境當成上一輪的殘骸收掉。取鎖也會擋掉「那個位置根本
+	// 建不起來」，但它證明不了往後寫得進去：那要等真的登記一筆時才看得到。
+	let registry: GuestRegistry = .init(at: run.resolvedRegistryURL)
+	do {
+		try await registry.acquireExclusiveLock()
+	} catch {
+		logger.error("guest registry unusable: \(GitLabAPIError.safeDescription(of: error))")
+		exit(1)
+	}
+	// 開環境一律經登記那一層：這個行程活不過它開出去的環境——當掉或被重啟時它們照樣在那裡佔著
+	// 併發額度，而登記簿是新起來的行程唯一認得出「上一輪留下哪幾台」的東西（見
+	// `RegisteringExecutionBackend`）。包在外面而不是各處自己記，是為了讓開與收的每一條路徑都
+	// 經過它，沒有哪一條繞得過去。
+	let backend: RegisteringExecutionBackend = .init(
+		wrapping: NymphExecutionBackend(
+			transport: UnixSocketNymphTransport(socketPath: run.resolvedSocketPath),
+			configuration: run.backendConfiguration
+		),
+		registry: registry,
+		logger: logger
 	)
+	// 回收擺在領第一件之前：這一刻手上一件 job 都還沒有，登記在案的必定是上一輪留下來的。結果
+	// 不看——收了幾台、哪幾台沒收成都已經逐行寫進紀錄，而一台都沒收成也不是不開工的理由。
+	// 試幾輪而不是一輪：機器重開時服務管理器把兩邊同時拉起，lab-controller 先到的話第一輪
+	// 必定連不上；只試一輪的話，上一輪留下的環境會一路佔到下一次重啟。
+	//
+	// ⚠ 這個窗是有界的（十二輪、每輪隔十秒，約兩分鐘）：後端比這更晚才起得來時，上一輪的
+	// 殘骸仍會留在登記簿上、留到下一次啟動才再送一次焚毀。
+	//
+	// 不把它改成「丟到背景去無限重試」的理由不是延遲長短，是併發：回收擺在這裡時，手上還沒有
+	// 任何環境，焚毀送錯對象也只會打到上一輪的殘骸；搬到背景之後，它會與本行程開出去的環境同
+	// 時進行，後端若重用過識別碼，打到的就是自己正在跑的那一件 job。要走那條路得先確認識別碼
+	// 不被重用，而那件事不在這一片裡。
+	_ = await backend.reclaimOrphans(attempts: 12)
 	// 停止訊號同時當旗標、等待的鬧鐘與在飛領件的取消閘：兩輪之間的退避有三十秒，在飛的領件更
 	// 是 long-poll、hold 多久由站台端決定，只翻旗標的話喊停要等它們自己結束才被讀到，服務管理器
 	// 的收工寬限比那段等待短時，閒著的行程每次停止都以逾時強殺收場。取消只落在退避與領件另開的
@@ -145,6 +176,9 @@ if let run: RunCommand = parsedCommand as? RunCommand {
 			try? await Task.sleep(for: .seconds(stopGrace))
 		}
 	)
+	// 訊號處理器裝在回收之後、不裝在它之前：回收那一段沒有在看停止旗標，提早裝上只會把
+	// SIGTERM 變成「翻一個沒有人讀的旗標」，行程反而要跑滿整個回收窗才理會停止。裝在後面時，
+	// 回收期間的 SIGTERM 走預設處置當場結束——此刻手上零環境，那正是想要的結果。
 	let sources: [any DispatchSourceSignal] = installStopHandlers { stopSignal.stop() }
 	// 站台位址只印 scheme／host／port：`--host` 收得下 `https://oauth2:<token>@…` 這種形狀，
 	// 原樣印出等於把憑證寫進行程的第一行 stdout。
