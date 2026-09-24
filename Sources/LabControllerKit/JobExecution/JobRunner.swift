@@ -175,11 +175,13 @@ public struct JobRunner: Sendable {
 		/// 這次有沒有等過容量；等過才在環境開起來時補一行「等到了」。
 		var hasWaitedForCapacity: Bool = false
 
-		/// 喊停之後那段寬限的等待；第一次等容量時才起，之後每一輪共用同一份。
+		/// 喊停之後那段寬限的等待；第一次要用時才起，等容量的每一輪與環境開起來之後都共用同一份。
 		///
-		/// 每一輪各起一份會讓寬限從頭算起：正式路徑的那份等待是「等到喊停，再睡一段寬限」，
-		/// 而寬限（以秒計）多半比問一次的間隔長 ⇒ 每輪重起就永遠等不到它回來，收到停止訊號的
-		/// 行程於是一路等到這件 job 的預算用完。
+		/// 各起一份會讓寬限從頭算起：正式路徑的那份等待是「等到喊停，再睡一段寬限」，而喊停多半
+		/// 發生在開始等之前或等的期間 ⇒ 再起一份就是再睡滿一段。等容量那幾輪若各起一份，寬限
+		/// （以秒計）多半比問一次的間隔長、永遠等不到它回來，收到停止訊號的行程會一路等到這件 job
+		/// 的預算用完；先等過容量再進環境時若另起一份，喊停到真正放手的上限變成「等到容量那段」
+		/// 加上「一整段寬限」。
 		var stopGrace: Task<Void, Never>?
 
 		/// 環境開起來、工作進去過沒有。
@@ -316,7 +318,7 @@ public struct JobRunner: Sendable {
 					finished.entered = true
 					if finished.hasWaitedForCapacity { trace.write("已經等到容量，開始跑這件 job。") }
 					let report: JobRunReport = try await runOrAbort(plan, in: workspace, on: guest, before: deadline,
-					                                                recording: trace)
+					                                                recording: trace, progress: finished)
 					finished.report = report
 					return report
 				}
@@ -406,9 +408,28 @@ public struct JobRunner: Sendable {
 		}
 	}
 
+	/// 取這件 job 全程共用的那份「喊停之後的寬限」；還沒起過才起。
+	///
+	/// 等容量與跑 job 兩段都在看它，而正式路徑的那份等待是「等到喊停，再睡一段寬限」⇒ 兩段各起
+	/// 一份的話，先等過容量再進環境時寬限等於從頭再算一次，喊停到真正放手的上限變成兩段相加
+	/// （見 ``FinishedRun/stopGrace``）。
+	///
+	/// - Parameters:
+	///   - abortAfterStop: 收到停止訊號、寬限也用完時才回來的等待。
+	///   - finished: 跑到哪裡了；那份寬限存在它身上。
+	/// - Returns: 共用的那一份。
+	private func grace(
+		waiting abortAfterStop: @escaping @Sendable () async -> Void,
+		progress finished: FinishedRun
+	) -> Task<Void, Never> {
+		let stopGrace: Task<Void, Never> = finished.stopGrace ?? .init { await abortAfterStop() }
+		finished.stopGrace = stopGrace
+		return stopGrace
+	}
+
 	/// 等一輪之後再問一次；回報還能不能再問。
 	///
-	/// **等的期間也要聽得見停止訊號**：環境還沒開起來，``runOrAbort(_:in:on:before:recording:)``
+	/// **等的期間也要聽得見停止訊號**：環境還沒開起來，``runOrAbort(_:in:on:before:recording:progress:)``
 	/// 那條看門線還沒起來，這一段若只是單純地睡，收到停止訊號的行程會一路等到這件 job 的預算
 	/// 用完為止——而服務管理器給的收工寬限以秒計，等於回到被強殺的那個樣子。
 	///
@@ -423,8 +444,7 @@ public struct JobRunner: Sendable {
 			return now() < deadline ? .retry : .outOfTime
 		}
 		// 那份寬限只起一次、之後每一輪都等同一份（理由見 `FinishedRun.stopGrace`）。
-		let stopGrace: Task<Void, Never> = finished.stopGrace ?? .init { await abortAfterStop() }
-		finished.stopGrace = stopGrace
+		let stopGrace: Task<Void, Never> = grace(waiting: abortAfterStop, progress: finished)
 		// 這場競賽的兩邊是「等滿一輪」與「喊停之後的寬限也用完」，借的是跑 job 那一段同一個等待點。
 		let race: RunRace = .init()
 		let waiting: Task<Void, Never> = .init {
@@ -462,6 +482,7 @@ public struct JobRunner: Sendable {
 	///   - guest: 已經開好的環境。
 	///   - deadline: 這件 job 的時間上限。
 	///   - trace: 抄本。
+	///   - finished: 跑到哪裡了；那份寬限存在它身上，等過容量的話這裡接的是同一份。
 	/// - Returns: 這次的結果；寬限到期時為環境層失敗。
 	/// - Throws: ``ExecutionBackendError``，同 ``execute(_:in:on:before:recording:)``。
 	private func runOrAbort(
@@ -469,11 +490,14 @@ public struct JobRunner: Sendable {
 		in workspace: JobWorkspace,
 		on guest: GuestIdentifier,
 		before deadline: Date,
-		recording trace: TraceRecorder
+		recording trace: TraceRecorder,
+		progress finished: FinishedRun
 	) async throws -> JobRunReport {
 		guard let abortAfterStop: @Sendable () async -> Void = abortAfterStop else {
 			return try await execute(plan, in: workspace, on: guest, before: deadline, recording: trace)
 		}
+		// 等過容量就接那一份、沒等過才在這裡起（理由見 `grace(waiting:progress:)`）。
+		let stopGrace: Task<Void, Never> = grace(waiting: abortAfterStop, progress: finished)
 		let race: RunRace = .init()
 		let work: Task<JobRunReport, any Error> = .init {
 			try await execute(plan, in: workspace, on: guest, before: deadline, recording: trace)
@@ -483,7 +507,7 @@ public struct JobRunner: Sendable {
 			race.settle(.ranToEnd)
 		}
 		let watchdog: Task<Void, Never> = .init {
-			await abortAfterStop()
+			await stopGrace.value
 			guard !Task.isCancelled else { return }
 			// 焚毀失敗也照樣放手：留下來的環境在 `ps()` 上看得到，而繼續等下去只會等到被強殺。
 			try? await backend.destroy(guest)

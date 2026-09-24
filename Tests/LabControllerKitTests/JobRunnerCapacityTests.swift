@@ -184,4 +184,36 @@ private final class JobRunnerCapacityTests {
 		// 放掉停在等待裡的那份寬限，否則它會留到整個測試行程結束。
 		grace.open()
 	}
+
+	/// 等到容量、進了環境之後接的仍是同一份寬限：在那裡另起一份等於讓它從頭再睡一段，喊停到真正
+	/// 放手的上限變成「等容量那段」加上「一整段寬限」。
+	@Test
+	private func `keeps the same stop grace once capacity opens up`() async throws {
+		let inner: InMemoryExecutionBackend = .init()
+		let backend: CapacityLimitedBackend = .init(inner: inner, refusals: 1)
+		let plan: JobPlan = .init(
+			jobIdentifier: 6,
+			git: git,
+			steps: [.init(name: "script", script: ["swift build"])],
+			timeoutSeconds: 600
+		)
+		// 這道閘不開＝那份寬限等不完，於是數的是「它被起了幾次」而不是「誰先回來」。
+		let grace: TestGate = .init()
+		let armed: Mutex<Int> = .init(0)
+		let runner: JobRunner = .init(
+			backend: backend,
+			abortAfterStop: {
+				armed.withLock { $0 += 1 }
+				await grace.wait()
+			},
+			waitBeforeRetry: { _ in }
+		)
+		let report: JobRunReport = await runner.run(plan, on: image)
+		#expect(report.outcome == .completed)
+		#expect(backend.spawnAttempts == 2)
+		// 等過一輪容量、之後進了環境，而那份寬限自始至終只該有一份。
+		#expect(armed.withLock { $0 } == 1)
+		// 放掉停在等待裡的那份寬限，否則它會留到整個測試行程結束。
+		grace.open()
+	}
 }
