@@ -28,6 +28,13 @@ import Synchronization
 /// 寬限用完把環境收掉。這幾件事在 trace 裡也有，但 trace 送不回站台的那一刻就一起消失，而
 /// 那正是最需要在機器上查得到的時候。
 ///
+/// **trace 上另有一張分段時間表**：檔案樹鋪好、環境開起來、取碼、每一個真的跑到的步驟、以及
+/// 收尾，各留一行 `[lab_controller] stage=<段名> t=<時刻> elapsed=<秒>s`。存在理由是一件 job
+/// 只回報一個終態時，跑了三十分鐘與跑了七十秒長得一模一樣——事後查不出那段時間落在哪裡。段名
+/// 不含空白、欄位以空白切開，是要讓這幾行事後被 `grep` 出來直接排成一張表；步驟因此走索引而
+/// 不是名字（名字由緊接著的 `$ ` 那一行給）。略過的步驟不留行：時間表上多一段沒發生過的事，
+/// 讀表的人會去找它。
+///
 /// - Important: 紀錄行一律不帶變數值、命令與命令輸出；錯誤一律經
 ///   ``GitLabAPIError/safeDescription(of:)`` 收斂，收斂後仍可能內插 payload 帶進來的字串
 ///   （例如變數名），因此再經 ``JobPlan/masker`` 遮蔽一次才寫。
@@ -80,7 +87,11 @@ public struct JobRunner: Sendable {
 			return .init(outcome: .systemFailed, failureReason: .runnerSystemFailure, trace: trace.finish(),
 			             warnings: plan.warnings)
 		}
-		let deadline: Date = now().addingTimeInterval(.init(plan.timeoutSeconds))
+		// 時間原點與時間上限取同一刻：分開取的話，事後把各段的 `elapsed` 與「還剩多少預算」擺在
+		// 一起看會差一小段，而對不上的那一小段正是最花時間去確認的東西。
+		let startedAt: Date = now()
+		let deadline: Date = startedAt.addingTimeInterval(.init(plan.timeoutSeconds))
+		trace.mark("workspace", at: startedAt)
 		let specification: GuestSpecification = .init(image: image, injectedFiles: workspace.injectedFiles)
 		return await runInGuest(plan, in: workspace, as: specification, before: deadline, recording: trace)
 	}
@@ -118,7 +129,7 @@ public struct JobRunner: Sendable {
 	/// 做成參考型別是因為它要跨越 ``ExecutionBackend/withGuest(_:do:)`` 的閉包邊界——工作在
 	/// 裡面寫、收拾之後在外面還要再寫一行，兩邊必須是同一份，否則環境開不起來時那一段說明
 	/// 會連同抄本一起消失。
-	private final class TraceRecorder: Sendable {
+	fileprivate final class TraceRecorder: Sendable {
 
 		/// 以遮蔽規則建立。
 		init(masker: TraceMasker) {
@@ -155,6 +166,9 @@ public struct JobRunner: Sendable {
 
 			/// 已放行的內容。
 			internal var released: String = ""
+
+			/// 分段標記的時間原點；還沒開始跑時為 nil。
+			internal var origin: Date?
 		}
 
 		/// 受鎖保護的內部狀態。
@@ -317,6 +331,7 @@ public struct JobRunner: Sendable {
 					// 進到這裡＝環境開起來了，容量那條重試線到此為止。
 					finished.entered = true
 					if finished.hasWaitedForCapacity { trace.write("已經等到容量，開始跑這件 job。") }
+					trace.mark("guest", at: now())
 					let report: JobRunReport = try await runOrAbort(plan, in: workspace, on: guest, before: deadline,
 					                                                recording: trace, progress: finished)
 					finished.report = report
@@ -357,6 +372,9 @@ public struct JobRunner: Sendable {
 				\(plan.masker.mask(GitLabAPIError.safeDescription(of: error)))
 				"""
 			)
+			// 環境開不起來也算收尾：時間表少了最後一行，讀表的人分不出「這件 job 沒跑到收尾」與
+			// 「紀錄斷在半路」。
+			trace.mark("finish", at: now())
 			return .init(outcome: .systemFailed, failureReason: .runnerSystemFailure, trace: trace.finish(),
 			             warnings: plan.warnings)
 		}
@@ -541,6 +559,7 @@ public struct JobRunner: Sendable {
 		recording trace: TraceRecorder
 	) async throws -> JobRunReport {
 		if let checkout: String = workspace.checkoutScriptPath {
+			trace.mark("checkout", at: now())
 			trace.write("$ 取得程式碼")
 			let result: CommandResult = try await backend.exec(command(running: checkout), in: guest)
 			trace.write(output(of: result))
@@ -565,7 +584,10 @@ public struct JobRunner: Sendable {
 				trace.write("略過步驟 \(step.name)：它的執行條件是 \(step.runCondition.rawValue)。")
 				continue
 			}
-			guard now() < deadline else {
+			// 取一次、兩處用：判上限與標這一段的起點講的是同一刻，各取一次會讓時間表上的起點
+			// 與真正被拿去比對上限的那一刻對不起來。
+			let startingAt: Date = now()
+			guard startingAt < deadline else {
 				trace.write("已達本次 job 的時間上限（\(plan.timeoutSeconds) 秒），其餘步驟不再開始。")
 				// 已經有步驟失敗過的話，死因是那個失敗、不是逾時：把終態換成逾時等於用收尾的
 				// 樣子蓋掉真正的原因，而站台端對兩者的重試政策並不相同。
@@ -575,6 +597,9 @@ public struct JobRunner: Sendable {
 				}
 				return report(plan, outcome: .timeout, reason: .jobExecutionTimeout, exitCode: nil, trace: trace)
 			}
+			// 段名走索引而不是步驟名：步驟名由 payload 給、帶得進空白，而這幾行要切得開欄位。
+			// 讀得懂的那一份名字在緊接著的下一行。
+			trace.mark("step[\(index)]", at: startingAt)
 			trace.write("$ \(step.name)")
 			let result: CommandResult = try await backend.exec(command(running: workspace.stepScriptPaths[index]),
 			                                                   in: guest)
@@ -602,8 +627,9 @@ public struct JobRunner: Sendable {
 		exitCode: Int32?,
 		trace: TraceRecorder
 	) -> JobRunReport {
-		.init(outcome: outcome, failureReason: reason, exitCode: exitCode, trace: trace.finish(),
-		      warnings: plan.warnings)
+		trace.mark("finish", at: now())
+		return .init(outcome: outcome, failureReason: reason, exitCode: exitCode, trace: trace.finish(),
+		             warnings: plan.warnings)
 	}
 
 	/// 跑一份腳本的完整命令。
@@ -621,4 +647,31 @@ public struct JobRunner: Sendable {
 			.joined(separator: "\n")
 	}
 
+}
+
+// MARK: - JobRunner.TraceRecorder + 分段時間表
+
+/// 抄本上的那張分段時間表：跟「寫一行 trace」是兩件事，分開擺才看得出哪些行是給機器讀的。
+extension JobRunner.TraceRecorder {
+
+	/// 寫下一段的標記；第一段同時把時間原點定在這一刻。
+	///
+	/// 原點與第一段是同一刻、同一次取時刻：分成兩次取會讓第一段的 `elapsed` 落在一個沒有意義的
+	/// 小數上，而那個數字看起來像「這一段花了多久」。
+	///
+	/// **格式刻意固定**：這幾行是要在事後被 `grep` 出來排成一張時間表的，而不是給人一行行讀的。
+	/// 段名放在時刻之前、且不含空白（步驟走索引、名字由緊接著的 `$ ` 那一行給），欄位因此切得開。
+	///
+	/// - Parameters:
+	///   - stage: 段名。
+	///   - instant: 這一刻。
+	fileprivate func mark(_ stage: String, at instant: Date) {
+		let origin: Date = state.withLock { state in
+			let origin: Date = state.origin ?? instant
+			state.origin = origin
+			return origin
+		}
+		let elapsed: String = .init(format: "%.3f", instant.timeIntervalSince(origin))
+		write("[lab_controller] stage=\(stage) t=\(instant.formatted(.iso8601)) elapsed=\(elapsed)s")
+	}
 }
