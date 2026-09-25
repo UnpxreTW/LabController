@@ -118,7 +118,9 @@ private final class JobRunnerTests {
 	@Test
 	private func `reports no exit code when the budget runs out before any failure`() async {
 		let backend: InMemoryExecutionBackend = .init()
-		let clock: SteppingClock = .init(step: 45)
+		// 步長配的是「第一步跑得完、第二步跑不動」：這個時鐘每問一次走一步，而分段時間表的
+		// 標記也各問一次，步長因此不是隨便一個大於上限一半的數字。
+		let clock: SteppingClock = .init(step: 20)
 		let plan: JobPlan = .init(
 			jobIdentifier: 1,
 			steps: [
@@ -238,7 +240,9 @@ private final class JobRunnerTests {
 	@Test
 	private func `stops starting steps once the budget is spent`() async {
 		let backend: InMemoryExecutionBackend = .init()
-		let clock: SteppingClock = .init(step: 45)
+		// 步長配的是「第一步跑得完、第二步跑不動」：這個時鐘每問一次走一步，而分段時間表的
+		// 標記也各問一次，步長因此不是隨便一個大於上限一半的數字。
+		let clock: SteppingClock = .init(step: 20)
 		let plan: JobPlan = .init(
 			jobIdentifier: 1,
 			steps: [
@@ -261,7 +265,9 @@ private final class JobRunnerTests {
 		let backend: InMemoryExecutionBackend = .init(script: .init(handler: { command in
 			command.last?.hasSuffix("step-0.sh") == true ? result(4) : nil
 		}))
-		let clock: SteppingClock = .init(step: 45)
+		// 步長配的是「第一步跑得完、第二步跑不動」：這個時鐘每問一次走一步，而分段時間表的
+		// 標記也各問一次，步長因此不是隨便一個大於上限一半的數字。
+		let clock: SteppingClock = .init(step: 20)
 		let plan: JobPlan = .init(
 			jobIdentifier: 1,
 			steps: [
