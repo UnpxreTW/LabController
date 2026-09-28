@@ -39,8 +39,12 @@ extension JobRunner {
 		///
 		/// 放行的內容併回已放行的那份，所以收攏之後還能再寫、再收一次——收拾階段還要補一行的
 		/// 那條路徑走的就是這個。
+		///
+		/// 收攏同時把分段時間表關掉：時間表是要被排成一張表的，收尾那一行之後再多出任何一段，
+		/// 讀表的人就分不出哪一行才是結束。
 		internal func finish() -> String {
 			state.withLock { state in
+				state.closed = true
 				state.released += state.stream.flush()
 				return state.released
 			}
@@ -60,6 +64,9 @@ extension JobRunner {
 
 			/// 分段標記的時間原點；還沒開始跑時為 nil。
 			internal var origin: Date?
+
+			/// 分段時間表關了沒；收攏之後就不再收新的段。
+			internal var closed: Bool = false
 		}
 
 		/// 受鎖保護的內部狀態。
@@ -80,16 +87,23 @@ extension JobRunner.TraceRecorder {
 	/// **格式刻意固定**：這幾行是要在事後被 `grep` 出來排成一張時間表的，而不是給人一行行讀的。
 	/// 段名放在時刻之前、且不含空白（步驟走索引、名字由緊接著的 `$ ` 那一行給），欄位因此切得開。
 	///
+	/// - Important: 抄本收攏過一次之後這個方法什麼都不做。寬限到期那條路徑會讓收尾與被放手的
+	///   那段工作同時在寫，沒有這道閘時表上會多出一行落在收尾之後的段、甚至第二行收尾。
+	///
+	/// 判斷與落行在同一次上鎖裡完成，沒有走 ``write(_:)``：鎖不可重入，分成兩次上鎖時收攏會擠進
+	/// 兩者之間——閘剛放行、抄本隨即收攏，那一行仍然落在收尾之後。
+	///
 	/// - Parameters:
 	///   - stage: 段名。
 	///   - instant: 這一刻。
 	internal func mark(_ stage: String, at instant: Date) {
-		let origin: Date = state.withLock { state in
+		state.withLock { state in
+			guard !state.closed else { return }
 			let origin: Date = state.origin ?? instant
 			state.origin = origin
-			return origin
+			let elapsed: String = .init(format: "%.3f", instant.timeIntervalSince(origin))
+			let line: String = "[lab_controller] stage=\(stage) t=\(instant.formatted(.iso8601)) elapsed=\(elapsed)s"
+			state.released += state.stream.append(line + "\n")
 		}
-		let elapsed: String = .init(format: "%.3f", instant.timeIntervalSince(origin))
-		write("[lab_controller] stage=\(stage) t=\(instant.formatted(.iso8601)) elapsed=\(elapsed)s")
 	}
 }
