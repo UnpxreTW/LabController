@@ -8,6 +8,7 @@
 
 import Foundation
 import Logging
+import Synchronization
 
 /// 把一份消化過的 payload 在一個一次性執行環境裡跑完，回報怎麼收的。
 ///
@@ -15,12 +16,13 @@ import Logging
 /// 中間隔著 ``JobWorkspace`` 鋪出來的檔案樹。**這一層不碰站台**：trace 與終態怎麼回寫是
 /// ``JobRequestClient`` 那一側的事，兩者分開才能各自對著假的另一半測。
 ///
-/// **時間上限只在步驟與步驟之間看**：協議沒有取消，硬把一個跑飛的命令收掉的唯一手段是焚毀
-/// 整個環境，而那需要另一條與執行並行的看門線。所以這裡的保證是「不會再『開始』新的步驟」，
-/// 不是「一定在期限內結束」；真正的看門與容量治理是後續切片的事，不在這裡假裝已經有了。
+/// **時間上限兩處在看**：步驟與步驟之間各看一次，決定還要不要開始下一個；另有一條與執行並行
+/// 的看門線，在預算用完的那一刻焚毀整個環境。兩條都要——協議沒有取消，送進環境的那道命令不吃
+/// Task 取消，所以「不再開始新的步驟」擋不住一個已經跑飛的命令，而只靠看門線則要等到預算真的
+/// 用完，明明可以早一點收的 job 會多佔一段格子。
 /// 連帶的一個缺口一併寫明：**逾時之後連 `when: always` 的收拾步驟也不跑**——那類步驟要有
-/// 意義就得自帶一份不受本次預算約束的時間，而「另給一份預算」正是看門線那一片要一起決定的
-/// 事。在它到位之前，這裡寧可誠實地不跑，也不要給一個沒有盡頭的收拾階段。
+/// 意義就得自帶一份不受本次預算約束的時間，而那份預算取多少沒有依據可訂。在它有依據之前，
+/// 這裡寧可誠實地不跑，也不要給一個沒有盡頭的收拾階段。
 ///
 /// **紀錄與 trace 是兩份、寫的東西也不同**：trace 是要交回站台的那一份，逐行帶著 job 自己的
 /// 輸出；紀錄留在跑這件 job 的機器上，只寫這一層自身的狀態——環境開不起來、環境焚毀不掉、
@@ -79,7 +81,7 @@ public struct JobRunner: Sendable {
 			trace.write("執行環境的檔案準備不起來：\(error)")
 			logger.error(
 				"""
-				job \(plan.jobIdentifier) workspace unusable: \
+				job \(plan.jobIdentifier) workspace unusable: \\
 				\(plan.masker.mask(GitLabAPIError.safeDescription(of: error)))
 				"""
 			)
@@ -102,6 +104,7 @@ public struct JobRunner: Sendable {
 	///   - configuration: 本機設定。
 	///   - abortAfterStop: 收到停止訊號、寬限也用完時才回來的等待；不給即不設寬限。
 	///   - waitBeforeRetry: 後端說沒有餘裕時，再問一次之前的那段等待；不給即真的等那麼久。
+	///   - waitUntilDeadline: 看門線在焚毀環境之前的那段等待；不給即真的等到預算用完。
 	///   - logger: 紀錄出口；不給即取行程裝上的那一份。這一層只送出紀錄、不決定它們寫去哪裡。
 	///   - now: 取當下時刻的方式。
 	public init(
@@ -110,6 +113,7 @@ public struct JobRunner: Sendable {
 		abortAfterStop: (@Sendable () async -> Void)? = nil,
 		// try? 吞掉的只有取消：等待被中斷＝不必再等，往下那一圈自己會看時限，呼叫端不需要知道原因。
 		waitBeforeRetry: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) },
+		waitUntilDeadline: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) },
 		logger: Logger = .init(label: "lab-controller"),
 		now: @escaping @Sendable () -> Date = Date.init
 	) {
@@ -117,6 +121,7 @@ public struct JobRunner: Sendable {
 		self.configuration = configuration
 		self.abortAfterStop = abortAfterStop
 		self.waitBeforeRetry = waitBeforeRetry
+		self.waitUntilDeadline = waitUntilDeadline
 		self.logger = logger
 		self.now = now
 	}
@@ -152,6 +157,52 @@ public struct JobRunner: Sendable {
 		var entered: Bool = false
 	}
 
+	/// 裝第一個失敗步驟的結束碼的盒子；看門線在步驟中途收場時據它定死因。
+	///
+	/// 與 ``FinishedRun`` 分開、而且自己上鎖：這一份要跨執行緒——寫的是跑步驟那一條線，讀的是
+	/// 看門線收場之後的 ``runOrAbort(_:in:on:before:from:recording:progress:)``，而
+	/// ``FinishedRun`` 全程只有跑 job 那一條線自己碰。
+	private final class FirstFailure: Sendable {
+
+		/// 第一個失敗步驟的結束碼；沒有步驟失敗過、或失敗只發生在封存之後時為 nil。
+		internal var exitCode: Int32? {
+			state.withLock { $0.exitCode }
+		}
+
+		/// 記下第一個失敗的結束碼；後續的失敗、以及封存之後的失敗都不改寫它。
+		internal func record(_ exitCode: Int32) {
+			state.withLock { state in
+				guard
+					!state.isSealed,
+					state.exitCode == nil
+				else { return }
+				state.exitCode = exitCode
+			}
+		}
+
+		/// 封存：這一刻之後記進來的失敗不算。
+		///
+		/// 預算用完的那一刻環境就被焚毀，而環境沒了之後那道命令仍可能以非零結束碼回來（後端把
+		/// 被收掉的命令回成一份結果、不是一個錯）。那個結束碼是焚毀造成的，把它當死因等於用
+		/// 收尾的樣子蓋掉真正的原因——與這個盒子要修的方向恰好相反。
+		internal func seal() {
+			state.withLock { $0.isSealed = true }
+		}
+
+		/// 盒子的狀態。
+		private struct State {
+
+			/// 第一個失敗步驟的結束碼。
+			internal var exitCode: Int32?
+
+			/// 封存過沒有。
+			internal var isSealed: Bool = false
+		}
+
+		/// 受鎖保護的內部狀態。
+		private let state: Mutex<State> = .init(.init())
+	}
+
 	/// 收到停止訊號、寬限也用完時才回來的等待；nil ＝ 不設寬限，job 跑多久就等多久。
 	///
 	/// - Important: 兩處在看：job 執行中（看門線），以及等後端挪出餘裕的那一段——後者若不看，
@@ -161,6 +212,12 @@ public struct JobRunner: Sendable {
 
 	/// 後端說沒有餘裕時，再問一次之前的那段等待；測試靠它把時間跳過去、不真的睡。
 	private let waitBeforeRetry: @Sendable (Duration) async -> Void
+
+	/// 看門線在焚毀環境之前的那段等待；測試靠它把預算用完的那一刻挪到想要的位置、不真的睡。
+	///
+	/// 與 ``waitBeforeRetry`` 分開：兩者等的是不同的東西（一段固定的間隔 vs 這件 job 剩下的
+	/// 預算），而測試多半只想把其中一邊挪走。
+	private let waitUntilDeadline: @Sendable (Duration) async -> Void
 
 	/// 這一層的紀錄出口；寫的內容與界線見型別說明。
 	private let logger: Logger
@@ -222,9 +279,19 @@ public struct JobRunner: Sendable {
 					// 進到這裡＝環境開起來了，容量那條重試線到此為止。
 					finished.entered = true
 					if finished.hasWaitedForCapacity { trace.write("已經等到容量，開始跑這件 job。") }
-					trace.mark("guest", at: now())
-					let report: JobRunReport = try await runOrAbort(plan, in: workspace, on: guest, before: deadline,
-					                                                recording: trace, progress: finished)
+					// 這一刻取一次、兩處用：時間表上「環境開起來」那一段的起點，同時也是看門線算
+					// 剩餘預算的基準。各取一次會讓兩者差一小段，而時鐘是注入的、多問一次就多走一步。
+					let enteredAt: Date = now()
+					trace.mark("guest", at: enteredAt)
+					let report: JobRunReport = try await runOrAbort(
+						plan,
+						in: workspace,
+						on: guest,
+						before: deadline,
+						from: enteredAt,
+						recording: trace,
+						progress: finished
+					)
 					finished.report = report
 					return report
 				}
@@ -259,7 +326,7 @@ public struct JobRunner: Sendable {
 			trace.write("執行環境沒能把事情做成：\(error)")
 			logger.error(
 				"""
-				job \(plan.jobIdentifier) execution environment failed: \
+				job \(plan.jobIdentifier) execution environment failed: \\
 				\(plan.masker.mask(GitLabAPIError.safeDescription(of: error)))
 				"""
 			)
@@ -276,7 +343,7 @@ public struct JobRunner: Sendable {
 		// 「有東西沒收乾淨」。
 		logger.error(
 			"""
-			job \(plan.jobIdentifier) guest could not be destroyed: \
+			job \(plan.jobIdentifier) guest could not be destroyed: \\
 			\(plan.masker.mask(GitLabAPIError.safeDescription(of: error)))
 			"""
 		)
@@ -338,7 +405,7 @@ public struct JobRunner: Sendable {
 
 	/// 等一輪之後再問一次；回報還能不能再問。
 	///
-	/// **等的期間也要聽得見停止訊號**：環境還沒開起來，``runOrAbort(_:in:on:before:recording:progress:)``
+	/// **等的期間也要聽得見停止訊號**：環境還沒開起來，``runOrAbort(_:in:on:before:from:recording:progress:)``
 	/// 那條看門線還沒起來，這一段若只是單純地睡，收到停止訊號的行程會一路等到這件 job 的預算
 	/// 用完為止——而服務管理器給的收工寬限以秒計，等於回到被強殺的那個樣子。
 	///
@@ -354,7 +421,8 @@ public struct JobRunner: Sendable {
 		}
 		// 那份寬限只起一次、之後每一輪都等同一份（理由見 `FinishedRun.stopGrace`）。
 		let stopGrace: Task<Void, Never> = grace(waiting: abortAfterStop, progress: finished)
-		// 這場競賽的兩邊是「等滿一輪」與「喊停之後的寬限也用完」，借的是跑 job 那一段同一個等待點。
+		// 這場競賽的兩邊是「等滿一輪」與「喊停之後的寬限也用完」，借的是跑 job 那一段同一個等待點；
+		// 時間預算那一邊不在這裡起——環境還沒開起來，沒有東西可焚毀，預算由每一輪回來時自己比對。
 		let race: RunRace = .init()
 		let waiting: Task<Void, Never> = .init {
 			await waitBeforeRetry(Self.capacityRetryInterval)
@@ -374,56 +442,75 @@ public struct JobRunner: Sendable {
 
 		case .aborted:
 			return .stopped
+
+		// 這一場沒有起時間預算那一邊，收不到這一種；真收到就當預算用完收——寧可讓這件 job 以逾時
+		// 結束，也不要在一條不該走到的路徑上停掉整個行程。
+		case .timedOut:
+			return .outOfTime
 		}
 	}
 
-	/// 跑完這件 job，或在停止寬限用完時就地放手。
+	/// 跑完這件 job，或在停止寬限用完、時間預算用完時就地放手。
 	///
-	/// - Important: 寬限到期時**不等那段已經送進環境的命令**——``ExecutionBackend/exec(_:in:)``
-	///   送進去之後不吃 Task 取消，等它回來等於沒有寬限。焚毀環境之後就地回一份環境層失敗的結果，
-	///   那件 job 因此仍回寫得出去、行程也退得了。
+	/// - Important: 兩種到期都**不等那段已經送進環境的命令**——``ExecutionBackend/exec(_:in:)``
+	///   送進去之後不吃 Task 取消，等它回來等於沒有上限。焚毀環境之後就地回一份結果，那件 job
+	///   因此仍回寫得出去、行程也退得了。
 	///
-	/// - Note: 沒注入 `abortAfterStop` 時整段退化成直接跑，一顆多餘的 Task 都不開。
+	/// - Note: 看門線是常設的：時間預算每件 job 都有，所以這裡總是起一場競賽。停止寬限那一邊
+	///   才看有沒有注入 `abortAfterStop`。
 	///
 	/// - Parameters:
 	///   - plan: 消化過的 payload。
 	///   - workspace: 已鋪好的檔案樹。
 	///   - guest: 已經開好的環境。
 	///   - deadline: 這件 job 的時間上限。
+	///   - enteredAt: 環境開起來的那一刻；看門線據它算還剩多少預算。
 	///   - trace: 抄本。
 	///   - finished: 跑到哪裡了；那份寬限存在它身上，等過容量的話這裡接的是同一份。
-	/// - Returns: 這次的結果；寬限到期時為環境層失敗。
-	/// - Throws: ``ExecutionBackendError``，同 ``execute(_:in:on:before:recording:)``。
+	/// - Returns: 這次的結果；寬限到期時為環境層失敗，預算用完時為逾時——但預算用完之前已經有
+	///   步驟失敗過的話，死因仍是那個失敗。
+	/// - Throws: ``ExecutionBackendError``，同 ``execute(_:in:on:before:recording:failing:)``。
 	private func runOrAbort(
 		_ plan: JobPlan,
 		in workspace: JobWorkspace,
 		on guest: GuestIdentifier,
 		before deadline: Date,
+		from enteredAt: Date,
 		recording trace: TraceRecorder,
 		progress finished: FinishedRun
 	) async throws -> JobRunReport {
-		guard let abortAfterStop: @Sendable () async -> Void = abortAfterStop else {
-			return try await execute(plan, in: workspace, on: guest, before: deadline, recording: trace)
-		}
-		// 等過容量就接那一份、沒等過才在這裡起（理由見 `grace(waiting:progress:)`）。
-		let stopGrace: Task<Void, Never> = grace(waiting: abortAfterStop, progress: finished)
 		let race: RunRace = .init()
+		// 失敗過沒有要跨線讀：寫的是下面那條工作線，讀的是看門線收場之後的這裡。
+		let failure: FirstFailure = .init()
 		let work: Task<JobRunReport, any Error> = .init {
-			try await execute(plan, in: workspace, on: guest, before: deadline, recording: trace)
+			try await execute(plan, in: workspace, on: guest, before: deadline, recording: trace, failing: failure)
 		}
 		let finishing: Task<Void, Never> = .init {
 			_ = try? await work.value
 			race.settle(.ranToEnd)
 		}
-		let watchdog: Task<Void, Never> = .init {
-			await stopGrace.value
-			guard !Task.isCancelled else { return }
-			// 焚毀失敗也照樣放手：留下來的環境在 `ps()` 上看得到，而繼續等下去只會等到被強殺。
-			try? await backend.destroy(guest)
-			race.settle(.aborted)
+		let stopWatchdog: Task<Void, Never>? = abortAfterStop.map { abortAfterStop in
+			// 等過容量就接那一份、沒等過才在這裡起（理由見 `grace(waiting:progress:)`）。
+			let stopGrace: Task<Void, Never> = grace(waiting: abortAfterStop, progress: finished)
+			return watchdog(destroying: guest, after: { await stopGrace.value }, settling: race, as: .aborted)
 		}
+		// 剩下多少預算從環境開起來那一刻算：開環境與等容量吃的是同一份額度，等滿宣告值等於讓每件
+		// job 多拿一段。
+		let remaining: Duration = .seconds(max(deadline.timeIntervalSince(enteredAt), 0))
+		let untilDeadline: @Sendable (Duration) async -> Void = waitUntilDeadline
+		let deadlineWatchdog: Task<Void, Never> = watchdog(
+			destroying: guest,
+			after: {
+				await untilDeadline(remaining)
+				// 焚毀之前封存：這一刻之後那道命令若以非零結束碼回來，那是被收掉造成的、不是死因。
+				failure.seal()
+			},
+			settling: race,
+			as: .timedOut
+		)
 		defer {
-			watchdog.cancel()
+			deadlineWatchdog.cancel()
+			stopWatchdog?.cancel()
 			finishing.cancel()
 		}
 		switch await race.outcome() {
@@ -435,11 +522,22 @@ public struct JobRunner: Sendable {
 			// 環境是哪一台。
 			logger.warning("job \(plan.jobIdentifier) exceeded the stop grace; destroyed guest \(guest)")
 			return report(plan, outcome: .systemFailed, reason: .runnerSystemFailure, exitCode: nil, trace: trace)
+		case .timedOut:
+			trace.write("已達本次 job 的時間上限（\(plan.timeoutSeconds) 秒），執行環境已焚毀。")
+			logger.warning("job \(plan.jobIdentifier) exceeded its time limit; destroyed guest \(guest)")
+			// 已經有步驟失敗過的話，死因是那個失敗、不是逾時——理由與步驟邊界那一道判斷相同：
+			// 把終態換成逾時等於用收尾的樣子蓋掉真正的原因，而站台端對兩者的重試政策並不相同。
+			guard let exitCode: Int32 = failure.exitCode else {
+				return report(plan, outcome: .timeout, reason: .jobExecutionTimeout, exitCode: nil, trace: trace)
+			}
+			return report(plan, outcome: .jobFailed, reason: .scriptFailure, exitCode: exitCode, trace: trace)
 		}
 	}
 
 	/// 在已開好的環境裡取碼並逐步驟跑。
 	///
+	/// - Parameter failure: 第一個失敗步驟的結束碼記在這裡；看門線在步驟中途收場時，死因由它決定
+	///   （這個回傳值那時算不得數——那一場競賽已經被看門線收掉，這一條之後交進來的結果一律丟棄）。
 	/// - Throws: ``ExecutionBackendError``——那類是「根本沒跑成」，由 ``run(_:on:)`` 收成
 	///   ``JobOutcome/systemFailed``；命令自己的非零結束碼不在此列，它是結果。
 	private func execute(
@@ -447,7 +545,8 @@ public struct JobRunner: Sendable {
 		in workspace: JobWorkspace,
 		on guest: GuestIdentifier,
 		before deadline: Date,
-		recording trace: TraceRecorder
+		recording trace: TraceRecorder,
+		failing failure: FirstFailure
 	) async throws -> JobRunReport {
 		if let checkout: String = workspace.checkoutScriptPath {
 			trace.mark("checkout", at: now())
@@ -460,7 +559,7 @@ public struct JobRunner: Sendable {
 				trace.write("取得程式碼失敗（結束碼 \(result.exitCode)），本次一個步驟都不跑。")
 				logger.warning(
 					"""
-					job \(plan.jobIdentifier) could not check out the code on guest \(guest); \
+					job \(plan.jobIdentifier) could not check out the code on guest \(guest); \\
 					exit code \(result.exitCode)
 					"""
 				)
@@ -469,7 +568,6 @@ public struct JobRunner: Sendable {
 			}
 		}
 		var hasFailed: Bool = false
-		var firstFailureExitCode: Int32?
 		for (index, step) in plan.steps.enumerated() {
 			guard step.runCondition.shouldRun(afterFailure: hasFailed) else {
 				trace.write("略過步驟 \(step.name)：它的執行條件是 \(step.runCondition.rawValue)。")
@@ -484,7 +582,7 @@ public struct JobRunner: Sendable {
 				// 樣子蓋掉真正的原因，而站台端對兩者的重試政策並不相同。
 				guard !hasFailed else {
 					return report(plan, outcome: .jobFailed, reason: .scriptFailure,
-					              exitCode: firstFailureExitCode, trace: trace)
+					              exitCode: failure.exitCode, trace: trace)
 				}
 				return report(plan, outcome: .timeout, reason: .jobExecutionTimeout, exitCode: nil, trace: trace)
 			}
@@ -502,12 +600,10 @@ public struct JobRunner: Sendable {
 			}
 			trace.write("步驟 \(step.name) 以結束碼 \(result.exitCode) 失敗。")
 			hasFailed = true
-			if firstFailureExitCode == nil {
-				firstFailureExitCode = result.exitCode
-			}
+			failure.record(result.exitCode)
 		}
 		guard hasFailed else { return report(plan, outcome: .completed, exitCode: 0, trace: trace) }
-		return report(plan, outcome: .jobFailed, reason: .scriptFailure, exitCode: firstFailureExitCode, trace: trace)
+		return report(plan, outcome: .jobFailed, reason: .scriptFailure, exitCode: failure.exitCode, trace: trace)
 	}
 
 	/// 收尾成一份結果；trace 在此刻收攏，之後不再寫入。
