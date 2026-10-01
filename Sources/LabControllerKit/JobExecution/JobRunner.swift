@@ -81,7 +81,7 @@ public struct JobRunner: Sendable {
 			trace.write("執行環境的檔案準備不起來：\(error)")
 			logger.error(
 				"""
-				job \(plan.jobIdentifier) workspace unusable: \\
+				job \(plan.jobIdentifier) workspace unusable: \
 				\(plan.masker.mask(GitLabAPIError.safeDescription(of: error)))
 				"""
 			)
@@ -326,7 +326,7 @@ public struct JobRunner: Sendable {
 			trace.write("執行環境沒能把事情做成：\(error)")
 			logger.error(
 				"""
-				job \(plan.jobIdentifier) execution environment failed: \\
+				job \(plan.jobIdentifier) execution environment failed: \
 				\(plan.masker.mask(GitLabAPIError.safeDescription(of: error)))
 				"""
 			)
@@ -343,7 +343,7 @@ public struct JobRunner: Sendable {
 		// 「有東西沒收乾淨」。
 		logger.error(
 			"""
-			job \(plan.jobIdentifier) guest could not be destroyed: \\
+			job \(plan.jobIdentifier) guest could not be destroyed: \
 			\(plan.masker.mask(GitLabAPIError.safeDescription(of: error)))
 			"""
 		)
@@ -559,7 +559,7 @@ public struct JobRunner: Sendable {
 				trace.write("取得程式碼失敗（結束碼 \(result.exitCode)），本次一個步驟都不跑。")
 				logger.warning(
 					"""
-					job \(plan.jobIdentifier) could not check out the code on guest \(guest); \\
+					job \(plan.jobIdentifier) could not check out the code on guest \(guest); \
 					exit code \(result.exitCode)
 					"""
 				)
