@@ -35,7 +35,7 @@ public struct JobPollingLoop: Sendable {
 		/// 印出時一律遮掉 token，站台位址只留 scheme／host／port。
 		public var description: String {
 			"JobPollingLoop.Configuration(host: \(safeHost), image: \(image), "
-				+ "retryInterval: \(retryInterval), runnerToken: <redacted>)"
+				+ "retryInterval: \(retryInterval), keepaliveInterval: \(keepaliveInterval), runnerToken: <redacted>)"
 		}
 
 		/// 與 ``description`` 相同；debug 情境更需要這層保護，不是更不需要。
@@ -52,6 +52,7 @@ public struct JobPollingLoop: Sendable {
 					"image": image,
 					"runner": runner,
 					"retryInterval": retryInterval,
+					"keepaliveInterval": keepaliveInterval,
 					"runnerToken": "<redacted>"
 				],
 				displayStyle: .struct
@@ -77,6 +78,9 @@ public struct JobPollingLoop: Sendable {
 		/// 回應是立刻回來的，本側不退就成了一串緊迴圈，把本來只是閒著的情況變成兩邊都更忙。
 		public let retryInterval: TimeInterval
 
+		/// 跑 job 的期間，隔多久向站台報一次「還在跑」（秒）；上限與用途見 ``JobKeepalive``。
+		public let keepaliveInterval: TimeInterval
+
 		/// 逐欄建立。
 		///
 		/// - Parameters:
@@ -85,18 +89,22 @@ public struct JobPollingLoop: Sendable {
 		///   - image: 開執行環境用的基底。
 		///   - runner: 本機執行面設定；預設值見 ``JobRunnerConfiguration``。
 		///   - retryInterval: 領不到件（失敗，或此刻沒有工作）後的退避秒數；預設 30。
+		///   - keepaliveInterval: 跑 job 期間向站台回報的間隔秒數；預設
+		///     ``JobKeepalive/defaultInterval``，大於 ``JobKeepalive/maximumInterval`` 時以上限計。
 		public init(
 			host: String,
 			runnerToken: String,
 			image: GuestImage,
 			runner: JobRunnerConfiguration = .init(),
-			retryInterval: TimeInterval = 30
+			retryInterval: TimeInterval = 30,
+			keepaliveInterval: TimeInterval = JobKeepalive.defaultInterval
 		) {
 			self.host = host
 			self.runnerToken = runnerToken
 			self.image = image
 			self.runner = runner
 			self.retryInterval = retryInterval
+			self.keepaliveInterval = keepaliveInterval
 		}
 
 		/// 收斂成可安全記錄的站台位址：憑證常被嵌在網址的 userinfo 段。
@@ -180,9 +188,27 @@ public struct JobPollingLoop: Sendable {
 			let delivery: JobReportDelivery = try await deliver(Self.report(of: rejection), to: target, of: job.id)
 			return .init(disposition: .refused(jobIdentifier: job.id, delivery: delivery), cursor: result.lastUpdate)
 		case let .accepted(plan):
-			let runner: JobRunner = .init(backend: backend, configuration: configuration.runner,
-			                              abortAfterStop: abortRunningJob, logger: logger)
+			// 跑的期間一路向站台回報；站台說這件 job 已不在執行中時按下這支訊號，跑 job 那一層據此
+			// 焚毀環境。回報在 job 跑完、回寫之前收掉並等它真的停下：晚到的一次「還在跑」與終態
+			// 交錯送上去，站台端看到的順序就不保證了。
+			let cancellation: StopSignal = .init()
+			let keepalive: JobKeepalive = .init(
+				client: client,
+				target: target,
+				interval: configuration.keepaliveInterval,
+				wait: keepaliveWait
+			)
+			let keeping: Task<Void, Never> = .init { await keepalive.run(signaling: cancellation, logger: logger) }
+			let runner: JobRunner = .init(
+				backend: backend,
+				configuration: configuration.runner,
+				abortAfterStop: abortRunningJob,
+				abortWhenCanceled: { await cancellation.untilStopped() },
+				logger: logger
+			)
 			let report: JobRunReport = await runner.run(plan, on: configuration.image)
+			keeping.cancel()
+			await keeping.value
 			let delivery: JobReportDelivery = try await deliver(report, to: target, of: job.id)
 			return .init(
 				disposition: .handled(jobIdentifier: job.id, outcome: report.outcome, delivery: delivery),
@@ -281,6 +307,8 @@ public struct JobPollingLoop: Sendable {
 	///   - requestScope: 領件那一段跑在什麼範圍裡；預設直接跑、打不斷。
 	///   - abortRunningJob: 收到停止訊號、寬限也用完時才回來的等待；預設不給，執行中的 job 跑
 	///     多久就等多久。
+	///   - keepaliveWait: 跑 job 期間兩次回報之間等待的方式；預設真的睡指定秒數。不吃喊停：喊停
+	///     之後那段寬限裡 job 仍在跑，站台端照樣要看得到它。
 	public init(
 		client: JobRequestClient = .init(),
 		backend: any ExecutionBackend,
@@ -291,7 +319,8 @@ public struct JobPollingLoop: Sendable {
 		requestScope: @escaping @Sendable (
 			@escaping @Sendable () async throws -> JobRequestResult
 		) async throws -> JobRequestResult = JobPollingLoop.requestDirectly,
-		abortRunningJob: (@Sendable () async -> Void)? = nil
+		abortRunningJob: (@Sendable () async -> Void)? = nil,
+		keepaliveWait: @escaping @Sendable (TimeInterval) async -> Void = JobPollingLoop.sleep
 	) {
 		self.client = client
 		self.backend = backend
@@ -301,6 +330,7 @@ public struct JobPollingLoop: Sendable {
 		self.resendWait = resendWait
 		self.requestScope = requestScope
 		self.abortRunningJob = abortRunningJob
+		self.keepaliveWait = keepaliveWait
 	}
 
 	// MARK: Private
@@ -360,6 +390,12 @@ public struct JobPollingLoop: Sendable {
 	///   這一支處理的是已經領到、跑到一半的 job：結果照樣回寫得出去（環境層失敗），只是不再等
 	///   它自己跑完。nil ＝ 不設寬限。
 	private let abortRunningJob: (@Sendable () async -> Void)?
+
+	/// 跑 job 期間兩次回報之間等待的方式；測試注入不真的睡的版本。
+	///
+	/// 不與 ``wait`` 共用：那一支吃喊停、喊停後一秒都不等，而喊停之後的寬限裡 job 還在跑——
+	/// 回報在那時停掉，站台端取消了這件 job 這一側也看不到。
+	private let keepaliveWait: @Sendable (TimeInterval) async -> Void
 
 	/// 把一份結果送回站台；第一次送不出去就退開一段再送一次。
 	///
