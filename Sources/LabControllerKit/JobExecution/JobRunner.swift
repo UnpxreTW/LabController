@@ -8,7 +8,6 @@
 
 import Foundation
 import Logging
-import Synchronization
 
 /// 把一份消化過的 payload 在一個一次性執行環境裡跑完，回報怎麼收的。
 ///
@@ -103,6 +102,8 @@ public struct JobRunner: Sendable {
 	///   - backend: 執行後端。
 	///   - configuration: 本機設定。
 	///   - abortAfterStop: 收到停止訊號、寬限也用完時才回來的等待；不給即不設寬限。
+	///   - abortWhenCanceled: 站台取消這件 job 時才回來的等待；不給即不聽取消。會被呼叫不只一次，
+	///     每一次都要在取消之後回來（見 ``JobKeepalive``）。
 	///   - waitBeforeRetry: 後端說沒有餘裕時，再問一次之前的那段等待；不給即真的等那麼久。
 	///   - waitUntilDeadline: 看門線在焚毀環境之前的那段等待；不給即真的等到預算用完。
 	///   - logger: 紀錄出口；不給即取行程裝上的那一份。這一層只送出紀錄、不決定它們寫去哪裡。
@@ -111,6 +112,7 @@ public struct JobRunner: Sendable {
 		backend: any ExecutionBackend,
 		configuration: JobRunnerConfiguration = .init(),
 		abortAfterStop: (@Sendable () async -> Void)? = nil,
+		abortWhenCanceled: (@Sendable () async -> Void)? = nil,
 		// try? 吞掉的只有取消：等待被中斷＝不必再等，往下那一圈自己會看時限，呼叫端不需要知道原因。
 		waitBeforeRetry: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) },
 		waitUntilDeadline: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) },
@@ -120,6 +122,7 @@ public struct JobRunner: Sendable {
 		self.backend = backend
 		self.configuration = configuration
 		self.abortAfterStop = abortAfterStop
+		self.abortWhenCanceled = abortWhenCanceled
 		self.waitBeforeRetry = waitBeforeRetry
 		self.waitUntilDeadline = waitUntilDeadline
 		self.logger = logger
@@ -157,58 +160,22 @@ public struct JobRunner: Sendable {
 		var entered: Bool = false
 	}
 
-	/// 裝第一個失敗步驟的結束碼的盒子；看門線在步驟中途收場時據它定死因。
-	///
-	/// 與 ``FinishedRun`` 分開、而且自己上鎖：這一份要跨執行緒——寫的是跑步驟那一條線，讀的是
-	/// 看門線收場之後的 ``runOrAbort(_:in:on:before:from:recording:progress:)``，而
-	/// ``FinishedRun`` 全程只有跑 job 那一條線自己碰。
-	private final class FirstFailure: Sendable {
-
-		/// 第一個失敗步驟的結束碼；沒有步驟失敗過、或失敗只發生在封存之後時為 nil。
-		internal var exitCode: Int32? {
-			state.withLock { $0.exitCode }
-		}
-
-		/// 記下第一個失敗的結束碼；後續的失敗、以及封存之後的失敗都不改寫它。
-		internal func record(_ exitCode: Int32) {
-			state.withLock { state in
-				guard
-					!state.isSealed,
-					state.exitCode == nil
-				else { return }
-				state.exitCode = exitCode
-			}
-		}
-
-		/// 封存：這一刻之後記進來的失敗不算。
-		///
-		/// 預算用完的那一刻環境就被焚毀，而環境沒了之後那道命令仍可能以非零結束碼回來（後端把
-		/// 被收掉的命令回成一份結果、不是一個錯）。那個結束碼是焚毀造成的，把它當死因等於用
-		/// 收尾的樣子蓋掉真正的原因——與這個盒子要修的方向恰好相反。
-		internal func seal() {
-			state.withLock { $0.isSealed = true }
-		}
-
-		/// 盒子的狀態。
-		private struct State {
-
-			/// 第一個失敗步驟的結束碼。
-			internal var exitCode: Int32?
-
-			/// 封存過沒有。
-			internal var isSealed: Bool = false
-		}
-
-		/// 受鎖保護的內部狀態。
-		private let state: Mutex<State> = .init(.init())
-	}
-
 	/// 收到停止訊號、寬限也用完時才回來的等待；nil ＝ 不設寬限，job 跑多久就等多久。
 	///
 	/// - Important: 兩處在看：job 執行中（看門線），以及等後端挪出餘裕的那一段——後者若不看，
 	///   收到停止訊號的行程會一路等到這件 job 的預算用完。job 自己的時間上限走的是另一條
 	///   （見 ``JobPlan/timeoutSeconds``）。
 	private let abortAfterStop: (@Sendable () async -> Void)?
+
+	/// 站台取消這件 job 時才回來的等待；nil ＝ 不聽取消。
+	///
+	/// 與 ``abortAfterStop`` 分開：喊停有一段寬限、給 job 機會自己跑完，取消沒有——站台端已經
+	/// 不要這件 job 的結果，再跑下去只是佔著環境。與它一樣兩處在看：job 執行中與等容量的那一段。
+	///
+	/// - Important: 不像 ``abortAfterStop`` 只起一份共用：等容量的每一輪與跑 job 那一段各叫
+	///   一次，所以它必須在取消之後**每一次**都立刻回來（一支已經按下的 ``StopSignal`` 的
+	///   ``StopSignal/untilStopped()`` 即是）。
+	private let abortWhenCanceled: (@Sendable () async -> Void)?
 
 	/// 後端說沒有餘裕時，再問一次之前的那段等待；測試靠它把時間跳過去、不真的睡。
 	private let waitBeforeRetry: @Sendable (Duration) async -> Void
@@ -225,7 +192,7 @@ public struct JobRunner: Sendable {
 	/// 取當下時刻；測試靠它推時鐘，正式路徑取系統時間。
 	private let now: @Sendable () -> Date
 
-	/// 等容量的三種收法。
+	/// 等容量的四種收法。
 	private enum CapacityWait {
 
 		/// 等滿了一輪，可以再問一次。
@@ -236,6 +203,9 @@ public struct JobRunner: Sendable {
 
 		/// 等的期間收到停止訊號、寬限也用完了。
 		case stopped
+
+		/// 等的期間站台取消了這件 job。
+		case canceled
 	}
 
 	/// 這個錯是不是「後端當下沒有餘裕」。
@@ -381,6 +351,11 @@ public struct JobRunner: Sendable {
 			trace.write("等容量的期間收到停止訊號，這件 job 不再開始。")
 			logger.warning("job \(plan.jobIdentifier) gave up waiting for capacity after the stop grace")
 			return false
+
+		case .canceled:
+			trace.write("等容量的期間站台取消了這件 job，不再開始。")
+			logger.warning("job \(plan.jobIdentifier) was canceled by the server while waiting for capacity")
+			return false
 		}
 	}
 
@@ -415,25 +390,36 @@ public struct JobRunner: Sendable {
 	/// - Returns: 還能再問一次、預算用完、或等的期間被喊停。
 	private func waitForCapacity(before deadline: Date, progress finished: FinishedRun) async -> CapacityWait {
 		guard now() < deadline else { return .outOfTime }
-		guard let abortAfterStop: @Sendable () async -> Void = abortAfterStop else {
+		guard abortAfterStop != nil || abortWhenCanceled != nil else {
 			await waitBeforeRetry(Self.capacityRetryInterval)
 			return now() < deadline ? .retry : .outOfTime
 		}
 		// 那份寬限只起一次、之後每一輪都等同一份（理由見 `FinishedRun.stopGrace`）。
-		let stopGrace: Task<Void, Never> = grace(waiting: abortAfterStop, progress: finished)
-		// 這場競賽的兩邊是「等滿一輪」與「喊停之後的寬限也用完」，借的是跑 job 那一段同一個等待點；
-		// 時間預算那一邊不在這裡起——環境還沒開起來，沒有東西可焚毀，預算由每一輪回來時自己比對。
+		let stopGrace: Task<Void, Never>? = abortAfterStop.map { grace(waiting: $0, progress: finished) }
+		// 這場競賽的邊是「等滿一輪」、「喊停之後的寬限也用完」與「站台取消了這件 job」，借的是跑 job
+		// 那一段同一個等待點；時間預算那一邊不在這裡起——環境還沒開起來，沒有東西可焚毀，預算由每一輪
+		// 回來時自己比對。
 		let race: RunRace = .init()
 		let waiting: Task<Void, Never> = .init {
 			await waitBeforeRetry(Self.capacityRetryInterval)
 			race.settle(.ranToEnd)
 		}
-		let watching: Task<Void, Never> = .init {
-			await stopGrace.value
-			race.settle(.aborted)
+		let watching: Task<Void, Never>? = stopGrace.map { stopGrace in
+			.init {
+				await stopGrace.value
+				race.settle(.aborted)
+			}
+		}
+		let cancelWatching: Task<Void, Never>? = abortWhenCanceled.map { abortWhenCanceled in
+			.init {
+				await abortWhenCanceled()
+				guard !Task.isCancelled else { return }
+				race.settle(.canceled)
+			}
 		}
 		defer {
-			watching.cancel()
+			cancelWatching?.cancel()
+			watching?.cancel()
 			waiting.cancel()
 		}
 		switch await race.outcome() {
@@ -442,6 +428,9 @@ public struct JobRunner: Sendable {
 
 		case .aborted:
 			return .stopped
+
+		case .canceled:
+			return .canceled
 
 		// 這一場沒有起時間預算那一邊，收不到這一種；真收到就當預算用完收——寧可讓這件 job 以逾時
 		// 結束，也不要在一條不該走到的路徑上停掉整個行程。
@@ -494,6 +483,9 @@ public struct JobRunner: Sendable {
 			let stopGrace: Task<Void, Never> = grace(waiting: abortAfterStop, progress: finished)
 			return watchdog(destroying: guest, after: { await stopGrace.value }, settling: race, as: .aborted)
 		}
+		let cancelWatchdog: Task<Void, Never>? = abortWhenCanceled.map { abortWhenCanceled in
+			watchdog(destroying: guest, after: abortWhenCanceled, settling: race, as: .canceled)
+		}
 		// 剩下多少預算從環境開起來那一刻算：開環境與等容量吃的是同一份額度，等滿宣告值等於讓每件
 		// job 多拿一段。
 		let remaining: Duration = .seconds(max(deadline.timeIntervalSince(enteredAt), 0))
@@ -510,6 +502,7 @@ public struct JobRunner: Sendable {
 		)
 		defer {
 			deadlineWatchdog.cancel()
+			cancelWatchdog?.cancel()
 			stopWatchdog?.cancel()
 			finishing.cancel()
 		}
@@ -521,6 +514,12 @@ public struct JobRunner: Sendable {
 			// 帶上環境識別碼：這一行要跟開環境那一側自己的紀錄對得起來，事後才查得出那台被收掉的
 			// 環境是哪一台。
 			logger.warning("job \(plan.jobIdentifier) exceeded the stop grace; destroyed guest \(guest)")
+			return report(plan, outcome: .systemFailed, reason: .runnerSystemFailure, exitCode: nil, trace: trace)
+		case .canceled:
+			trace.write("站台已取消這件 job，執行環境已焚毀。")
+			logger.warning("job \(plan.jobIdentifier) was canceled by the server; destroyed guest \(guest)")
+			// 終態照環境層失敗收：站台端那件 job 已經不在執行中，這份終態送上去會被以 403 擋下（見
+			// ``JobResultReporter``），它的用處只剩本側紀錄——而「沒跑完、環境被收掉」正是這個意思。
 			return report(plan, outcome: .systemFailed, reason: .runnerSystemFailure, exitCode: nil, trace: trace)
 		case .timedOut:
 			trace.write("已達本次 job 的時間上限（\(plan.timeoutSeconds) 秒），執行環境已焚毀。")

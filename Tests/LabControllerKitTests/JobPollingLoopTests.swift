@@ -584,6 +584,42 @@ private final class JobPollingLoopStopTests {
 		backend.release()
 	}
 
+	/// 跑的期間站台取消了這件 job：回報收到 403 就焚毀環境，不等它跑到自己的時間上限。
+	///
+	/// 這一條釘的是接線：回報那一支要用這件 job 的專屬 token 送，而它收到的取消要真的傳到跑 job
+	/// 的那一層去。
+	@Test
+	private func `aborts a running job once the server cancels it`() async throws {
+		let canceled: HTTPResponse = .init(statusCode: 403, headers: ["Job-Status": "canceled"])
+		let transport: ScriptedPollTransport = .init([.respond(assignedJob), .respond(canceled)])
+		let backend: BlockingExecutionBackend = .init()
+		let loop: JobPollingLoop = .init(
+			client: .init(transport: transport),
+			backend: backend,
+			reporter: .init(client: .init(transport: transport), wait: { _ in }),
+			configuration: configuration,
+			// 第一次回報落在命令送進環境之後，後面幾輪不會再到——取消一到這一支就收手。
+			keepaliveWait: { _ in await backend.untilFirstCommand() }
+		)
+		let cycle: JobCycle = try await loop.poll(cursor: nil)
+		guard case let .handled(jobIdentifier, outcome, delivery) = cycle.disposition else {
+			Issue.record("這一輪應該收下並經手了那件 job")
+			backend.release()
+			return
+		}
+		#expect(jobIdentifier == 7)
+		#expect(outcome == .systemFailed)
+		// 站台端那件 job 已不在執行中，終態送上去照樣被擋——這裡要的是它有送、而且收得了手。
+		#expect(delivery.acceptance == .aborted)
+		#expect(backend.inner.destroyCount >= 1)
+		let requests: [HTTPRequest] = transport.requests.withLock { $0 }
+		let keepalive: HTTPRequest = try #require(requests.dropFirst().first)
+		#expect(keepalive.method == "PUT")
+		#expect(try requestBody(of: keepalive)["state"] as? String == "running")
+		#expect(try requestBody(of: keepalive)["token"] as? String == "synthetic-job-token")
+		backend.release()
+	}
+
 	/// 領件被喊停打斷時就地收工，不記成故障、也不再退避一輪。
 	///
 	/// 打斷回來的是取消類錯誤，寫成 `poll failed` 會讓每次正常停止都在紀錄裡留一行假錯誤；
