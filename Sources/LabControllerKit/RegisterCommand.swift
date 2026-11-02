@@ -13,25 +13,25 @@ import ArgumentParser
 /// runner 認證 token，可執行檔會印出、由操作者自行保存（不落任何檔案）。
 public struct RegisterCommand: ParsableCommand {
 
-    public static let configuration: CommandConfiguration = .init(
-        commandName: "register",
-        abstract: "Register this controller as a GitLab runner and print the authentication token."
-    )
+	public static let configuration: CommandConfiguration = .init(
+		commandName: "register",
+		abstract: "Register this controller as a GitLab runner and print the authentication token."
+	)
 
-    /// GitLab 站台基底網址（例如 `https://gitlab.example.com`）。
-    @Option(help: "Base URL of the GitLab instance, e.g. https://gitlab.example.com.")
-    public var host: String
+	/// GitLab 站台基底網址（例如 `https://gitlab.example.com`）。
+	@Option(help: "Base URL of the GitLab instance, e.g. https://gitlab.example.com.")
+	public var host: String
 
-    /// runner registration token；僅用於換取認證 token、不落任何檔案。
-    @Option(help: "Runner registration token used to obtain the authentication token.")
-    public var registrationToken: String
+	/// runner registration token；僅用於換取認證 token、不落任何檔案。
+	@Option(help: "Runner registration token used to obtain the authentication token.")
+	public var registrationToken: String
 
-    /// 顯示於 GitLab runner 清單的描述文字；未給時由站台端預設。
-    @Option(help: "Optional description shown in the GitLab runner list.")
-    public var description: String?
+	/// 顯示於 GitLab runner 清單的描述文字；未給時由站台端預設。
+	@Option(help: "Optional description shown in the GitLab runner list.")
+	public var description: String?
 
-    /// 紀錄門檻（`--log-level`；未給時看 `LOG_LEVEL`）。
-    @OptionGroup public var logging: LoggingOptions
+	/// 紀錄門檻（`--log-level`；未給時看 `LOG_LEVEL`）。
+	@OptionGroup public var logging: LoggingOptions
 
-    public init() {}
+	public init() {}
 }
