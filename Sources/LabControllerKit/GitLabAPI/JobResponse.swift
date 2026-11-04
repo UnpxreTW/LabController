@@ -21,336 +21,336 @@
 /// 不符預期就把鍵名記進 `unreadableFields`、其餘部分照常解，交由 `JobAdmission` 擋下並
 /// 在 trace 上明說。**協議漂移要讓 job 紅得看得見，不是讓 job 消失。**
 public struct JobResponse: Decodable, Sendable, Equatable,
-    CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+	CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
 
-    /// job 識別碼；trace 回寫與狀態回報都用它組路徑。
-    public let id: Int
+	/// job 識別碼；trace 回寫與狀態回報都用它組路徑。
+	public let id: Int
 
-    /// 此 job 專屬的短命 token；trace／狀態回報用它認證，與 runner 認證 token 不同。
-    ///
-    /// ⚠️ **憑證**：本型別的 `description`／`customMirror` 刻意不含它，變數值同理。
-    public let token: String
+	/// 此 job 專屬的短命 token；trace／狀態回報用它認證，與 runner 認證 token 不同。
+	///
+	/// ⚠️ **憑證**：本型別的 `description`／`customMirror` 刻意不含它，變數值同理。
+	public let token: String
 
-    /// job 環境變數。
-    public let variables: [JobVariable]
+	/// job 環境變數。
+	public let variables: [JobVariable]
 
-    /// job 執行步驟。
-    public let steps: [JobStep]
+	/// job 執行步驟。
+	public let steps: [JobStep]
 
-    /// git 座標；站台端未提供時為 nil。
-    public let gitInfo: GitInfo?
+	/// git 座標；站台端未提供時為 nil。
+	public let gitInfo: GitInfo?
 
-    /// 站台對本次執行的指示（目前只有逾時）；未提供時為 nil。
-    public let runnerInfo: JobRunnerInfo?
+	/// 站台對本次執行的指示（目前只有逾時）；未提供時為 nil。
+	public let runnerInfo: JobRunnerInfo?
 
-    /// CI 檔指定的 container image 名稱。
-    ///
-    /// 判準是「CI 檔有沒有要求 image」而不是「名字寫了沒」：payload 送了 `image` 物件卻
-    /// 沒帶 `name`（或帶空字串）時，這裡回空字串而非 nil——回 nil 會讓收件判定當成沒宣告，
-    /// 於是一個要求容器的 job 被當普通 job 跑完回綠。
-    ///
-    /// **nil 有兩種意思**：欄位缺席／為 null（真的沒宣告），或該欄位形狀讀不懂——後者
-    /// **必定同時出現在 `unreadableFields`**。因此「`imageName == nil` ⇒ 沒要求容器」
-    /// 這個推論只有在 `unreadableFields` 為空時才成立。
-    public let imageName: String?
+	/// CI 檔指定的 container image 名稱。
+	///
+	/// 判準是「CI 檔有沒有要求 image」而不是「名字寫了沒」：payload 送了 `image` 物件卻
+	/// 沒帶 `name`（或帶空字串）時，這裡回空字串而非 nil——回 nil 會讓收件判定當成沒宣告，
+	/// 於是一個要求容器的 job 被當普通 job 跑完回綠。
+	///
+	/// **nil 有兩種意思**：欄位缺席／為 null（真的沒宣告），或該欄位形狀讀不懂——後者
+	/// **必定同時出現在 `unreadableFields`**。因此「`imageName == nil` ⇒ 沒要求容器」
+	/// 這個推論只有在 `unreadableFields` 為空時才成立。
+	public let imageName: String?
 
-    /// CI 檔宣告的 service 數量。
-    public let serviceCount: Int
+	/// CI 檔宣告的 service 數量。
+	public let serviceCount: Int
 
-    /// CI 檔宣告的產物上傳項目數量。
-    public let artifactCount: Int
+	/// CI 檔宣告的產物上傳項目數量。
+	public let artifactCount: Int
 
-    /// CI 檔宣告的快取項目數量。
-    public let cacheCount: Int
+	/// CI 檔宣告的快取項目數量。
+	public let cacheCount: Int
 
-    /// 本 job 的全部上游；**含沒有產物者**，判有無產物走 `carriesArtifacts`。
-    public let dependencies: [JobDependency]
+	/// 本 job 的全部上游；**含沒有產物者**，判有無產物走 `carriesArtifacts`。
+	public let dependencies: [JobDependency]
 
-    /// payload 裡有、但形狀不是本片認得的欄位名（站台端原始鍵名）。
-    ///
-    /// **非空 ≠ 沒宣告**：這代表協議已經漂移（例如 `cache` 由陣列改成物件），該欄位到底
-    /// 宣告了什麼無從得知，因此**同一 payload 的其餘判定也不可信**。`JobAdmission` 一律
-    /// 把它當成擋路的缺口，讓 job 明確紅在 trace 上、附上是哪個欄位讀不懂。
-    public let unreadableFields: [String]
+	/// payload 裡有、但形狀不是本片認得的欄位名（站台端原始鍵名）。
+	///
+	/// **非空 ≠ 沒宣告**：這代表協議已經漂移（例如 `cache` 由陣列改成物件），該欄位到底
+	/// 宣告了什麼無從得知，因此**同一 payload 的其餘判定也不可信**。`JobAdmission` 一律
+	/// 把它當成擋路的缺口，讓 job 明確紅在 trace 上、附上是哪個欄位讀不懂。
+	public let unreadableFields: [String]
 
-    /// 以顯式欄位建立（測試用）。
-    public init(
-        id: Int,
-        token: String,
-        variables: [JobVariable] = [],
-        steps: [JobStep] = [],
-        gitInfo: GitInfo? = nil,
-        runnerInfo: JobRunnerInfo? = nil,
-        imageName: String? = nil,
-        serviceCount: Int = 0,
-        artifactCount: Int = 0,
-        cacheCount: Int = 0,
-        dependencies: [JobDependency] = [],
-        unreadableFields: [String] = []
-    ) {
-        self.id = id
-        self.token = token
-        self.variables = variables
-        self.steps = steps
-        self.gitInfo = gitInfo
-        self.runnerInfo = runnerInfo
-        self.imageName = imageName
-        self.serviceCount = serviceCount
-        self.artifactCount = artifactCount
-        self.cacheCount = cacheCount
-        self.dependencies = dependencies
-        self.unreadableFields = unreadableFields
-    }
+	/// 以顯式欄位建立（測試用）。
+	public init(
+		id: Int,
+		token: String,
+		variables: [JobVariable] = [],
+		steps: [JobStep] = [],
+		gitInfo: GitInfo? = nil,
+		runnerInfo: JobRunnerInfo? = nil,
+		imageName: String? = nil,
+		serviceCount: Int = 0,
+		artifactCount: Int = 0,
+		cacheCount: Int = 0,
+		dependencies: [JobDependency] = [],
+		unreadableFields: [String] = []
+	) {
+		self.id = id
+		self.token = token
+		self.variables = variables
+		self.steps = steps
+		self.gitInfo = gitInfo
+		self.runnerInfo = runnerInfo
+		self.imageName = imageName
+		self.serviceCount = serviceCount
+		self.artifactCount = artifactCount
+		self.cacheCount = cacheCount
+		self.dependencies = dependencies
+		self.unreadableFields = unreadableFields
+	}
 
-    /// 印出來只給形狀；`token` 與變數值不進任何輸出。
-    public var description: String {
-        "JobResponse(id: \(id), steps: \(steps.count), variables: \(variables.count))"
-    }
+	/// 印出來只給形狀；`token` 與變數值不進任何輸出。
+	public var description: String {
+		"JobResponse(id: \(id), steps: \(steps.count), variables: \(variables.count))"
+	}
 
-    /// 與 `description` 相同；debug 情境更需要這層保護，不是更不需要。
-    public var debugDescription: String {
-        description
-    }
+	/// 與 `description` 相同；debug 情境更需要這層保護，不是更不需要。
+	public var debugDescription: String {
+		description
+	}
 
-    /// `dump` 走 `Mirror`、繞過上面兩者，故一併收口。
-    public var customMirror: Mirror {
-        .init(
-            self,
-            children: [
-                "id": id,
-                "steps": steps.count,
-                "variables": variables.count,
-                "imageName": imageName ?? "nil",
-                "serviceCount": serviceCount,
-                "artifactCount": artifactCount,
-                "cacheCount": cacheCount,
-                "dependencies": dependencies.count,
-                "unreadableFields": unreadableFields,
-            ],
-            displayStyle: .struct
-        )
-    }
+	/// `dump` 走 `Mirror`、繞過上面兩者，故一併收口。
+	public var customMirror: Mirror {
+		.init(
+			self,
+			children: [
+				"id": id,
+				"steps": steps.count,
+				"variables": variables.count,
+				"imageName": imageName ?? "nil",
+				"serviceCount": serviceCount,
+				"artifactCount": artifactCount,
+				"cacheCount": cacheCount,
+				"dependencies": dependencies.count,
+				"unreadableFields": unreadableFields,
+			],
+			displayStyle: .struct
+		)
+	}
 
-    /// 解碼；集合類欄位缺席一律視為空，形狀不符則記進 `unreadableFields` 而非拋出。
-    public init(from decoder: any Decoder) throws {
-        let container: KeyedDecodingContainer<CodingKeys> = try decoder.container(keyedBy: CodingKeys.self)
-        // 只有這兩個欄位缺了就真的無事可做：沒有 id 無從回報、沒有 token 無從認證。
-        self.id = try container.decode(Int.self, forKey: .id)
-        self.token = try container.decode(String.self, forKey: .token)
-        var unreadable: [String] = []
-        self.variables = Self.variables(in: container, into: &unreadable)
-        self.steps = Self.optional([JobStep].self, in: container, forKey: .steps, into: &unreadable) ?? []
-        self.gitInfo = Self.optional(GitInfo.self, in: container, forKey: .gitInfo, into: &unreadable)
-        self.runnerInfo = Self.optional(JobRunnerInfo.self, in: container, forKey: .runnerInfo, into: &unreadable)
-        self.imageName = Self.imageName(in: container, into: &unreadable)
-        self.serviceCount = Self.count(in: container, forKey: .services, into: &unreadable)
-        self.artifactCount = Self.count(in: container, forKey: .artifacts, into: &unreadable)
-        self.cacheCount = Self.count(in: container, forKey: .cache, into: &unreadable)
-        self.dependencies = Self.optional(
-            [JobDependency].self,
-            in: container,
-            forKey: .dependencies,
-            into: &unreadable
-        ) ?? []
-        // `when` 對映不到不是「少一個小欄位」：回落值會讓步驟跑在錯的結果分支上，與形狀
-        // 漂移同級，因此走同一條通道擋下。一個 job 只記一次，別讓 100 個步驟刷出 100 行。
-        if self.steps.contains(where: { $0.unrecognisedRunCondition != nil }) {
-            unreadable.append("steps[].when")
-        }
-        // 站台說某個上游有產物、我們卻讀不出檔名：形狀跟預期不一樣，不可以就這樣算了。
-        if self.dependencies.contains(where: \.hasUnreadableArtifactsFilename) {
-            unreadable.append("dependencies[].artifacts_file.filename")
-        }
-        // 有 git_info 卻缺 repo_url／sha：clone 做不到，但要在收件時就說，不是留到執行階段炸。
-        if self.gitInfo?.hasIncompleteCoordinates == true {
-            unreadable.append("git_info.repo_url/sha")
-        }
-        self.unreadableFields = unreadable
-    }
+	/// 解碼；集合類欄位缺席一律視為空，形狀不符則記進 `unreadableFields` 而非拋出。
+	public init(from decoder: any Decoder) throws {
+		let container: KeyedDecodingContainer<CodingKeys> = try decoder.container(keyedBy: CodingKeys.self)
+		// 只有這兩個欄位缺了就真的無事可做：沒有 id 無從回報、沒有 token 無從認證。
+		self.id = try container.decode(Int.self, forKey: .id)
+		self.token = try container.decode(String.self, forKey: .token)
+		var unreadable: [String] = []
+		self.variables = Self.variables(in: container, into: &unreadable)
+		self.steps = Self.optional([JobStep].self, in: container, forKey: .steps, into: &unreadable) ?? []
+		self.gitInfo = Self.optional(GitInfo.self, in: container, forKey: .gitInfo, into: &unreadable)
+		self.runnerInfo = Self.optional(JobRunnerInfo.self, in: container, forKey: .runnerInfo, into: &unreadable)
+		self.imageName = Self.imageName(in: container, into: &unreadable)
+		self.serviceCount = Self.count(in: container, forKey: .services, into: &unreadable)
+		self.artifactCount = Self.count(in: container, forKey: .artifacts, into: &unreadable)
+		self.cacheCount = Self.count(in: container, forKey: .cache, into: &unreadable)
+		self.dependencies = Self.optional(
+			[JobDependency].self,
+			in: container,
+			forKey: .dependencies,
+			into: &unreadable
+		) ?? []
+		// `when` 對映不到不是「少一個小欄位」：回落值會讓步驟跑在錯的結果分支上，與形狀
+		// 漂移同級，因此走同一條通道擋下。一個 job 只記一次，別讓 100 個步驟刷出 100 行。
+		if self.steps.contains(where: { $0.unrecognisedRunCondition != nil }) {
+			unreadable.append("steps[].when")
+		}
+		// 站台說某個上游有產物、我們卻讀不出檔名：形狀跟預期不一樣，不可以就這樣算了。
+		if self.dependencies.contains(where: \.hasUnreadableArtifactsFilename) {
+			unreadable.append("dependencies[].artifacts_file.filename")
+		}
+		// 有 git_info 卻缺 repo_url／sha：clone 做不到，但要在收件時就說，不是留到執行階段炸。
+		if self.gitInfo?.hasIncompleteCoordinates == true {
+			unreadable.append("git_info.repo_url/sha")
+		}
+		self.unreadableFields = unreadable
+	}
 
-    /// 解一個可缺席的欄位；形狀不符時**不拋**，改把鍵名記進 `unreadable` 並回 nil。
-    private static func optional<Value: Decodable>(
-        _ type: Value.Type,
-        in container: KeyedDecodingContainer<CodingKeys>,
-        forKey key: CodingKeys,
-        into unreadable: inout [String]
-    ) -> Value? {
-        // 走 do/catch 而非 `try?`：`decodeIfPresent` 本來就回 optional，`try?` 會把
-        // 「解不出來」與「欄位缺席」壓成同一個 nil，於是形狀漂移悄悄變成「沒宣告」。
-        do {
-            return try container.decodeIfPresent(type, forKey: key)
-        } catch {
-            unreadable.append(key.stringValue)
-            return nil
-        }
-    }
+	/// 解一個可缺席的欄位；形狀不符時**不拋**，改把鍵名記進 `unreadable` 並回 nil。
+	private static func optional<Value: Decodable>(
+		_ type: Value.Type,
+		in container: KeyedDecodingContainer<CodingKeys>,
+		forKey key: CodingKeys,
+		into unreadable: inout [String]
+	) -> Value? {
+		// 走 do/catch 而非 `try?`：`decodeIfPresent` 本來就回 optional，`try?` 會把
+		// 「解不出來」與「欄位缺席」壓成同一個 nil，於是形狀漂移悄悄變成「沒宣告」。
+		do {
+			return try container.decodeIfPresent(type, forKey: key)
+		} catch {
+			unreadable.append(key.stringValue)
+			return nil
+		}
+	}
 
-    /// 逐個解變數；讀不懂的那一個記名字，其餘照常帶出來。
-    ///
-    /// 與其他欄位的差別在於**壞掉的粒度**：`variables` 是一整批互不相干的東西，其中一個
-    /// 形狀不對就把整批換成空陣列，等於把 job 的觸發脈絡全部丟掉，trace 上也只看得到
-    /// 「variables 讀不懂」——是哪一個變數、其餘的還在不在，都要人去翻站台端才知道。
-    ///
-    /// 讀不懂的元素仍記進 `unreadable`（記法：讀得出名字記 `variables[名稱]`，連名字都讀不出
-    /// 就記序號 `variables[#0]`），**不因為其餘元素完好就放行**——收不收由 `JobAdmission` 判，
-    /// 這裡只負責把「壞在哪一個」講清楚。變數的值不進這條路徑：它可能是秘密，而名稱不是。
-    ///
-    /// 陣列本身形狀不對（例如送成字串）仍記整個欄位名，與其他欄位同形；缺席或 null 視為沒有變數。
-    private static func variables(
-        in container: KeyedDecodingContainer<CodingKeys>,
-        into unreadable: inout [String]
-    ) -> [JobVariable] {
-        guard container.contains(.variables) else { return [] }
-        guard let isNull: Bool = try? container.decodeNil(forKey: .variables) else {
-            unreadable.append(CodingKeys.variables.stringValue)
-            return []
-        }
-        guard !isNull else { return [] }
-        guard var elements: UnkeyedDecodingContainer = try? container.nestedUnkeyedContainer(
-            forKey: .variables
-        ) else {
-            unreadable.append(CodingKeys.variables.stringValue)
-            return []
-        }
-        var decoded: [JobVariable] = []
-        while !elements.isAtEnd {
-            let position: Int = elements.currentIndex
-            // 逐元素解**必須**走一個不會拋的包裝型別：陣列容器的游標只在解成功時前進，
-            // 元素直接拋錯時游標停在原地，接住錯誤再繼續就成了永遠走不完的迴圈。
-            guard let element: PartiallyReadableVariable = try? elements.decode(
-                PartiallyReadableVariable.self
-            ) else {
-                // 包裝型別自己不拋，走到這裡代表容器層出了別的事；停下來並記整個欄位名，
-                // 不假裝已經讀完——剩下幾個沒讀到，說「沒有」就是報錯的方向。
-                unreadable.append(CodingKeys.variables.stringValue)
-                return decoded
-            }
-            if let variable: JobVariable = element.variable {
-                decoded.append(variable)
-            } else {
-                unreadable.append("variables[\(element.name ?? "#\(position)")]")
-            }
-        }
-        return decoded
-    }
+	/// 逐個解變數；讀不懂的那一個記名字，其餘照常帶出來。
+	///
+	/// 與其他欄位的差別在於**壞掉的粒度**：`variables` 是一整批互不相干的東西，其中一個
+	/// 形狀不對就把整批換成空陣列，等於把 job 的觸發脈絡全部丟掉，trace 上也只看得到
+	/// 「variables 讀不懂」——是哪一個變數、其餘的還在不在，都要人去翻站台端才知道。
+	///
+	/// 讀不懂的元素仍記進 `unreadable`（記法：讀得出名字記 `variables[名稱]`，連名字都讀不出
+	/// 就記序號 `variables[#0]`），**不因為其餘元素完好就放行**——收不收由 `JobAdmission` 判，
+	/// 這裡只負責把「壞在哪一個」講清楚。變數的值不進這條路徑：它可能是秘密，而名稱不是。
+	///
+	/// 陣列本身形狀不對（例如送成字串）仍記整個欄位名，與其他欄位同形；缺席或 null 視為沒有變數。
+	private static func variables(
+		in container: KeyedDecodingContainer<CodingKeys>,
+		into unreadable: inout [String]
+	) -> [JobVariable] {
+		guard container.contains(.variables) else { return [] }
+		guard let isNull: Bool = try? container.decodeNil(forKey: .variables) else {
+			unreadable.append(CodingKeys.variables.stringValue)
+			return []
+		}
+		guard !isNull else { return [] }
+		guard var elements: UnkeyedDecodingContainer = try? container.nestedUnkeyedContainer(
+				forKey: .variables
+		) else {
+			unreadable.append(CodingKeys.variables.stringValue)
+			return []
+		}
+		var decoded: [JobVariable] = []
+		while !elements.isAtEnd {
+			let position: Int = elements.currentIndex
+			// 逐元素解**必須**走一個不會拋的包裝型別：陣列容器的游標只在解成功時前進，
+			// 元素直接拋錯時游標停在原地，接住錯誤再繼續就成了永遠走不完的迴圈。
+			guard let element: PartiallyReadableVariable = try? elements.decode(
+					PartiallyReadableVariable.self
+			) else {
+				// 包裝型別自己不拋，走到這裡代表容器層出了別的事；停下來並記整個欄位名，
+				// 不假裝已經讀完——剩下幾個沒讀到，說「沒有」就是報錯的方向。
+				unreadable.append(CodingKeys.variables.stringValue)
+				return decoded
+			}
+			if let variable: JobVariable = element.variable {
+				decoded.append(variable)
+			} else {
+				unreadable.append("variables[\(element.name ?? "#\(position)")]")
+			}
+		}
+		return decoded
+	}
 
-    /// 數出某個陣列欄位有幾筆，不解其內容。
-    ///
-    /// 本片只需要知道「有沒有宣告」。為了計數而把站台的欄位形狀抄成一組型別，等於替
-    /// 還沒實作的能力先綁死一份 schema——那份 schema 沒有任何測試會驗它，卻會隨站台
-    /// 版本慢慢腐爛，等真的要實作時反而得先分辨哪些欄位是當年抄錯的。
-    ///
-    /// 鍵不存在或為 null 都算 0 筆；鍵在、非 null 卻不是陣列則記進 `unreadable`——那代表
-    /// 協議變了，要顯眼地失敗，但**失敗的方式是讓這個 job 紅、不是讓整包 payload 消失**。
-    private static func count(
-        in container: KeyedDecodingContainer<CodingKeys>,
-        forKey key: CodingKeys,
-        into unreadable: inout [String]
-    ) -> Int {
-        guard container.contains(key) else { return 0 }
-        guard let isNull: Bool = try? container.decodeNil(forKey: key) else {
-            unreadable.append(key.stringValue)
-            return 0
-        }
-        guard !isNull else { return 0 }
-        guard let nested: UnkeyedDecodingContainer = try? container.nestedUnkeyedContainer(forKey: key) else {
-            unreadable.append(key.stringValue)
-            return 0
-        }
-        // 數不出筆數就不能當「沒宣告」——那是該拒不拒的方向。實務上 JSONDecoder 一定給得出
-        // 來，但這個 `??` 的預設值決定的是「不確定時往哪邊倒」，倒向 0 等於默默放行。
-        guard let count: Int = nested.count else {
-            unreadable.append(key.stringValue)
-            return 0
-        }
-        return count
-    }
+	/// 數出某個陣列欄位有幾筆，不解其內容。
+	///
+	/// 本片只需要知道「有沒有宣告」。為了計數而把站台的欄位形狀抄成一組型別，等於替
+	/// 還沒實作的能力先綁死一份 schema——那份 schema 沒有任何測試會驗它，卻會隨站台
+	/// 版本慢慢腐爛，等真的要實作時反而得先分辨哪些欄位是當年抄錯的。
+	///
+	/// 鍵不存在或為 null 都算 0 筆；鍵在、非 null 卻不是陣列則記進 `unreadable`——那代表
+	/// 協議變了，要顯眼地失敗，但**失敗的方式是讓這個 job 紅、不是讓整包 payload 消失**。
+	private static func count(
+		in container: KeyedDecodingContainer<CodingKeys>,
+		forKey key: CodingKeys,
+		into unreadable: inout [String]
+	) -> Int {
+		guard container.contains(key) else { return 0 }
+		guard let isNull: Bool = try? container.decodeNil(forKey: key) else {
+			unreadable.append(key.stringValue)
+			return 0
+		}
+		guard !isNull else { return 0 }
+		guard let nested: UnkeyedDecodingContainer = try? container.nestedUnkeyedContainer(forKey: key) else {
+			unreadable.append(key.stringValue)
+			return 0
+		}
+		// 數不出筆數就不能當「沒宣告」——那是該拒不拒的方向。實務上 JSONDecoder 一定給得出
+		// 來，但這個 `??` 的預設值決定的是「不確定時往哪邊倒」，倒向 0 等於默默放行。
+		guard let count: Int = nested.count else {
+			unreadable.append(key.stringValue)
+			return 0
+		}
+		return count
+	}
 
-    /// 取出 `image.name`；job 未指定 image 時站台把該欄位送成 null。
-    ///
-    /// **`image` 物件讀得懂就一定回非 nil**：名稱缺席或為空時回空字串，讓收件判定仍看得到
-    /// 「這個 job 要求了容器」。回 nil 代表欄位缺席／為 null，或形狀讀不懂（後者同時記進
-    /// `unreadable`）。
-    private static func imageName(
-        in container: KeyedDecodingContainer<CodingKeys>,
-        into unreadable: inout [String]
-    ) -> String? {
-        guard container.contains(.image) else { return nil }
-        guard let isNull: Bool = try? container.decodeNil(forKey: .image) else {
-            unreadable.append(CodingKeys.image.stringValue)
-            return nil
-        }
-        guard !isNull else { return nil }
-        // 形狀讀不懂時只記 unreadable、不另外回一個假的名字：`unreadableFields` 已足以擋下
-        // 這個 job，再補一條「image 名稱為（未具名）」只會在 trace 上多一行誤導——名字其實
-        // 就在 payload 裡，只是我們讀不出它的形狀。
-        guard let image: KeyedDecodingContainer<ImageCodingKeys> = try? container.nestedContainer(
-            keyedBy: ImageCodingKeys.self,
-            forKey: .image
-        ) else {
-            unreadable.append(CodingKeys.image.stringValue)
-            return nil
-        }
-        do {
-            return try image.decodeIfPresent(String.self, forKey: .name) ?? ""
-        } catch {
-            unreadable.append(CodingKeys.image.stringValue)
-            return nil
-        }
-    }
+	/// 取出 `image.name`；job 未指定 image 時站台把該欄位送成 null。
+	///
+	/// **`image` 物件讀得懂就一定回非 nil**：名稱缺席或為空時回空字串，讓收件判定仍看得到
+	/// 「這個 job 要求了容器」。回 nil 代表欄位缺席／為 null，或形狀讀不懂（後者同時記進
+	/// `unreadable`）。
+	private static func imageName(
+		in container: KeyedDecodingContainer<CodingKeys>,
+		into unreadable: inout [String]
+	) -> String? {
+		guard container.contains(.image) else { return nil }
+		guard let isNull: Bool = try? container.decodeNil(forKey: .image) else {
+			unreadable.append(CodingKeys.image.stringValue)
+			return nil
+		}
+		guard !isNull else { return nil }
+		// 形狀讀不懂時只記 unreadable、不另外回一個假的名字：`unreadableFields` 已足以擋下
+		// 這個 job，再補一條「image 名稱為（未具名）」只會在 trace 上多一行誤導——名字其實
+		// 就在 payload 裡，只是我們讀不出它的形狀。
+		guard let image: KeyedDecodingContainer<ImageCodingKeys> = try? container.nestedContainer(
+			keyedBy: ImageCodingKeys.self,
+			forKey: .image
+		) else {
+			unreadable.append(CodingKeys.image.stringValue)
+			return nil
+		}
+		do {
+			return try image.decodeIfPresent(String.self, forKey: .name) ?? ""
+		} catch {
+			unreadable.append(CodingKeys.image.stringValue)
+			return nil
+		}
+	}
 
-    /// 一個變數解得出來與否的兩態；**這個型別自己永遠不拋**。
-    ///
-    /// 存在的理由是陣列容器的游標：元素解碼拋錯時游標不前進，於是「接住錯誤、繼續下一個」
-    /// 會原地打轉。把不拋這件事做成型別的性質，逐元素的迴圈就不必再去處理游標。
-    private struct PartiallyReadableVariable: Decodable {
+	/// 一個變數解得出來與否的兩態；**這個型別自己永遠不拋**。
+	///
+	/// 存在的理由是陣列容器的游標：元素解碼拋錯時游標不前進，於是「接住錯誤、繼續下一個」
+	/// 會原地打轉。把不拋這件事做成型別的性質，逐元素的迴圈就不必再去處理游標。
+	private struct PartiallyReadableVariable: Decodable {
 
-        /// 解得出來的變數；讀不懂時為 nil。
-        let variable: JobVariable?
+		/// 解得出來的變數；讀不懂時為 nil。
+		let variable: JobVariable?
 
-        /// 讀不懂時仍取得到的變數名稱；連名稱都讀不出來則為 nil。
-        ///
-        /// 只留名稱、不留任何值：這個字串會被記進讀不懂的欄位清單、進而寫上 trace。
-        let name: String?
+		/// 讀不懂時仍取得到的變數名稱；連名稱都讀不出來則為 nil。
+		///
+		/// 只留名稱、不留任何值：這個字串會被記進讀不懂的欄位清單、進而寫上 trace。
+		let name: String?
 
-        /// 先照正常形狀解；解不出來就退而只取名稱。
-        init(from decoder: any Decoder) throws {
-            self.variable = try? .init(from: decoder)
-            guard self.variable == nil else {
-                self.name = nil
-                return
-            }
-            let container: KeyedDecodingContainer<NameCodingKeys>? = try? decoder.container(
-                keyedBy: NameCodingKeys.self
-            )
-            self.name = try? container?.decodeIfPresent(String.self, forKey: .key)
-        }
+		/// 先照正常形狀解；解不出來就退而只取名稱。
+		init(from decoder: any Decoder) throws {
+			self.variable = try? .init(from: decoder)
+			guard self.variable == nil else {
+				self.name = nil
+				return
+			}
+			let container: KeyedDecodingContainer<NameCodingKeys>? = try? decoder.container(
+				keyedBy: NameCodingKeys.self
+			)
+			self.name = try? container?.decodeIfPresent(String.self, forKey: .key)
+		}
 
-        /// 退而求其次時唯一會讀的欄位。
-        private enum NameCodingKeys: String, CodingKey {
+		/// 退而求其次時唯一會讀的欄位。
+		private enum NameCodingKeys: String, CodingKey {
 
-            /// 變數名稱。
-            case key
-        }
-    }
+			/// 變數名稱。
+			case key
+		}
+	}
 
-    /// `image` 物件內本片唯一會讀的欄位。
-    private enum ImageCodingKeys: String, CodingKey {
-        case name
-    }
+	/// `image` 物件內本片唯一會讀的欄位。
+	private enum ImageCodingKeys: String, CodingKey {
+		case name
+	}
 
-    /// 對應站台端欄位名（snake_case）。
-    private enum CodingKeys: String, CodingKey {
-        case id
-        case token
-        case variables
-        case steps
-        case gitInfo = "git_info"
-        case runnerInfo = "runner_info"
-        case image
-        case services
-        case artifacts
-        case cache
-        case dependencies
-    }
+	/// 對應站台端欄位名（snake_case）。
+	private enum CodingKeys: String, CodingKey {
+		case id
+		case token
+		case variables
+		case steps
+		case gitInfo = "git_info"
+		case runnerInfo = "runner_info"
+		case image
+		case services
+		case artifacts
+		case cache
+		case dependencies
+	}
 }
