@@ -528,3 +528,165 @@ private final class JobTraceAndStatusTests {
 		}
 	}
 }
+
+/// 產物上傳（`POST /api/v4/jobs/:id/artifacts`）的協議行為。
+private final class JobArtifactUploadTests {
+
+	/// 從 `Content-Type` 取出 multipart 的分隔字串；取不到即測試失敗。
+	private func boundary(of request: HTTPRequest) throws -> String {
+		let contentType: String = try #require(request.headers["Content-Type"])
+		let prefix: String = "multipart/form-data; boundary="
+		#expect(contentType.hasPrefix(prefix))
+		return .init(contentType.dropFirst(prefix.count))
+	}
+
+	/// 請求打在 `POST {host}/api/v4/jobs/:id/artifacts`、走 job token、三個查詢參數依字母序。
+	@Test
+	func `uploadArtifact posts to artifacts endpoint with job token and query`() async throws {
+		let transport: ScriptedTransport = .init([.init(statusCode: 201)])
+		let client: JobRequestClient = .init(transport: transport)
+		let artifact: JobArtifact = .init(
+			name: "build-output",
+			paths: ["out"],
+			artifactType: "archive",
+			artifactFormat: "zip",
+			expireIn: "1 week"
+		)
+		let result: ArtifactUploadResult = try await client.uploadArtifact(
+			host: "https://h.invalid/",
+			jobID: 7,
+			jobToken: "job-token",
+			artifact: artifact,
+			archive: .init("PK".utf8)
+		)
+		#expect(result == .uploaded)
+		let request: HTTPRequest = try #require(transport.requests.withLock { $0.first })
+		#expect(request.method == "POST")
+		#expect(
+			request.url.absoluteString
+				== "https://h.invalid/api/v4/jobs/7/artifacts?artifact_format=zip&artifact_type=archive&expire_in=1%20week"
+		)
+		#expect(request.headers["JOB-TOKEN"] == "job-token")
+		#expect(request.timeout == 600)
+	}
+
+	/// 空值的查詢參數整項不帶；三者皆空時連問號都沒有。
+	@Test
+	func `uploadArtifact omits empty query values`() async throws {
+		let transport: ScriptedTransport = .init([.init(statusCode: 201)])
+		let client: JobRequestClient = .init(transport: transport)
+		_ = try await client.uploadArtifact(
+			host: "https://h.invalid",
+			jobID: 7,
+			jobToken: "t",
+			artifact: .init(paths: ["out"]),
+			archive: .init()
+		)
+		let request: HTTPRequest = try #require(transport.requests.withLock { $0.first })
+		#expect(request.url.absoluteString == "https://h.invalid/api/v4/jobs/7/artifacts")
+	}
+
+	/// `+` 與 `&` 等字元必須編碼：站台會把未編碼的 `+` 讀成空白、`&` 讀成下一個參數。
+	@Test
+	func `uploadArtifact percent encodes reserved characters in expiry`() async throws {
+		let transport: ScriptedTransport = .init([.init(statusCode: 201)])
+		let client: JobRequestClient = .init(transport: transport)
+		_ = try await client.uploadArtifact(
+			host: "https://h.invalid",
+			jobID: 7,
+			jobToken: "t",
+			artifact: .init(paths: ["out"], expireIn: "1+week&x=y"),
+			archive: .init()
+		)
+		let request: HTTPRequest = try #require(transport.requests.withLock { $0.first })
+		#expect(request.url.absoluteString == "https://h.invalid/api/v4/jobs/7/artifacts?expire_in=1%2Bweek%26x%3Dy")
+	}
+
+	/// 本體是只有一個 `file` 欄位的 multipart，檔名取宣告的上傳檔名，檔案內容逐 byte 原樣。
+	@Test
+	func `uploadArtifact sends single file field with exact bytes`() async throws {
+		let transport: ScriptedTransport = .init([.init(statusCode: 201)])
+		let client: JobRequestClient = .init(transport: transport)
+		let archive: Data = .init([0x50, 0x4B, 0x03, 0x04, 0x00, 0xFF, 0x0D, 0x0A])
+		_ = try await client.uploadArtifact(
+			host: "https://h.invalid",
+			jobID: 7,
+			jobToken: "t",
+			artifact: .init(name: "build-output", paths: ["out"]),
+			archive: archive
+		)
+		let request: HTTPRequest = try #require(transport.requests.withLock { $0.first })
+		let separator: String = try boundary(of: request)
+		var expected: Data = .init()
+		expected.append(Data("--\(separator)\r\n".utf8))
+		expected.append(Data("Content-Disposition: form-data; name=\"file\"; filename=\"build-output.zip\"\r\n".utf8))
+		expected.append(Data("Content-Type: application/octet-stream\r\n\r\n".utf8))
+		expected.append(archive)
+		expected.append(Data("\r\n--\(separator)--\r\n".utf8))
+		#expect(request.body == expected)
+	}
+
+	/// 檔名來自 payload：引號與反斜線跳脫、換行換掉，不讓它在欄位標頭裡多長出一行。
+	@Test
+	func `uploadArtifact escapes filename in disposition header`() async throws {
+		let transport: ScriptedTransport = .init([.init(statusCode: 201)])
+		let client: JobRequestClient = .init(transport: transport)
+		_ = try await client.uploadArtifact(
+			host: "https://h.invalid",
+			jobID: 7,
+			jobToken: "t",
+			artifact: .init(name: "a\"b\\c\r\nX-Injected: 1", paths: ["out"]),
+			archive: .init()
+		)
+		let request: HTTPRequest = try #require(transport.requests.withLock { $0.first })
+		let body: String = try .init(decoding: #require(request.body), as: UTF8.self)
+		#expect(body.contains("filename=\"a\\\"b\\\\c__X-Injected: 1.zip\"\r\n"))
+		#expect(!body.contains("\r\nX-Injected"))
+	}
+
+	/// 站台回應依後續處置分類，非 201 一律不拋。
+	@Test
+	func `uploadArtifact classifies server responses`() async throws {
+		let location: String = "https://other.invalid/api/v4/jobs/7/artifacts"
+		let cases: [(HTTPResponse, ArtifactUploadResult)] = [
+			(.init(statusCode: 201), .uploaded),
+			(.init(statusCode: 307, headers: ["Location": location]), .redirected(location: location)),
+			(.init(statusCode: 307), .redirected(location: nil)),
+			(.init(statusCode: 403), .forbidden),
+			(.init(statusCode: 413), .tooLarge),
+			(.init(statusCode: 503), .serviceUnavailable),
+			(.init(statusCode: 500), .failed(statusCode: 500)),
+			(.init(statusCode: 200), .failed(statusCode: 200))
+		]
+		for (response, expected) in cases {
+			let client: JobRequestClient = .init(transport: ScriptedTransport([response]))
+			let result: ArtifactUploadResult = try await client.uploadArtifact(
+				host: "https://h.invalid",
+				jobID: 7,
+				jobToken: "t",
+				artifact: .init(paths: ["out"]),
+				archive: .init()
+			)
+			#expect(result == expected, "status \(response.statusCode)")
+		}
+	}
+
+	/// 站台位址不合法時拋出、且不夾帶憑證——與其他三支端點同一條規則。
+	@Test
+	func `uploadArtifact invalid host does not leak credentials`() async throws {
+		let client: JobRequestClient = .init(transport: ScriptedTransport([.init(statusCode: 201)]))
+		do {
+			_ = try await client.uploadArtifact(
+				host: "https://oauth2:glpat-synthetic@gitlab example.com",
+				jobID: 7,
+				jobToken: "t",
+				artifact: .init(),
+				archive: .init()
+			)
+			Issue.record("預期拋出 invalidURL")
+		} catch let GitLabAPIError.invalidURL(location) {
+			#expect(!location.contains("glpat-synthetic"))
+			#expect(!location.contains("oauth2"))
+		}
+	}
+}
