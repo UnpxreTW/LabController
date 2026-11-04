@@ -8,7 +8,7 @@
 
 import Foundation
 
-/// runner 協議中「領 job → 回寫 log → 回報成敗」三支端點的 client。
+/// runner 協議中「領 job → 回寫 log → 上傳產物 → 回報成敗」四支端點的 client。
 ///
 /// 與 `RunnerRegistrationClient` 平行、不共用型別：註冊用 registration token 換
 /// runner 認證 token，本 client 則用 runner 認證 token 領 job、再用 job 專屬 token
@@ -27,6 +27,12 @@ public struct JobRequestClient: Sendable {
 
 	/// 一般請求（trace／狀態回報）的逾時；這類應快速失敗。
 	public static let standardTimeout: TimeInterval = 30
+
+	/// 產物上傳的逾時；整份檔案在同一個請求裡送出，不能沿用一般請求的短逾時。
+	///
+	/// - Warning: 這是每個請求的閒置上限，不是總時長上限：正式傳輸（`URLSessionTransport`）的
+	///   session 另有 600 秒的整體上限，一次上傳從送出到收完回應超過 600 秒就會被中斷，不論本值設多少。
+	public static let artifactUploadTimeout: TimeInterval = 600
 
 	/// 傳輸層；正式路徑用 `URLSessionTransport`、測試注入假傳輸。
 	private let transport: any HTTPTransport
@@ -204,6 +210,62 @@ public struct JobRequestClient: Sendable {
 		}
 	}
 
+	/// `POST /api/v4/jobs/:id/artifacts`：上傳一份已打包好的產物。
+	///
+	/// 請求形狀照 runner 端（gitlab-runner v16.2 `network/gitlab.go` 的 `UploadRawArtifacts`）：
+	/// `JOB-TOKEN` 標頭認證，本體是 `multipart/form-data`、只有一個欄位 `file`（檔名取
+	/// ``JobArtifact/uploadFilename``），`expire_in`／`artifact_format`／`artifact_type` 三者
+	/// 放在查詢字串、空值整項不帶。
+	///
+	/// **必須在回報終態之前送**：站台只收執行中 job 的產物，終態寫入之後再送會得到 403。
+	///
+	/// 站台回的非 201 一律**不當成錯誤拋出**，由回傳值分類（見 ``ArtifactUploadResult``）——
+	/// 那些都是協議的一部分，重不重送由呼叫端決定。拋出的只有連線層的錯。
+	///
+	/// - Parameters:
+	///   - host: 站台位址。
+	///   - jobID: job 識別碼。
+	///   - jobToken: job 專屬 token。
+	///   - artifact: 這份產物的宣告；取檔名與三個查詢參數。
+	///   - archive: 已打包好的檔案內容。
+	/// - Returns: 站台回應的分類。
+	/// - Throws: 連線層的錯（`GitLabAPIError` 或傳輸層自己的錯）。
+	public func uploadArtifact(
+		host: String,
+		jobID: Int,
+		jobToken: String,
+		artifact: JobArtifact,
+		archive: Data
+	) async throws -> ArtifactUploadResult {
+		let boundary: String = "labcontroller-\(UUID().uuidString)"
+		let query: String = Self.artifactQuery(of: artifact)
+		let response: HTTPResponse = try await send(
+			method: "POST",
+			host: host,
+			path: query.isEmpty ? "jobs/\(jobID)/artifacts" : "jobs/\(jobID)/artifacts?\(query)",
+			headers: [
+				"Content-Type": "multipart/form-data; boundary=\(boundary)",
+				"JOB-TOKEN": jobToken
+			],
+			body: Self.multipartBody(file: archive, filename: artifact.uploadFilename, boundary: boundary),
+			timeout: Self.artifactUploadTimeout
+		)
+		switch response.statusCode {
+		case 201:
+			return .uploaded
+		case 307:
+			return .redirected(location: response.headerValue("Location"))
+		case 403:
+			return .forbidden
+		case 413:
+			return .tooLarge
+		case 503:
+			return .serviceUnavailable
+		default:
+			return .failed(statusCode: response.statusCode)
+		}
+	}
+
 	/// 從解碼錯誤取出「解不開的位置」，只回鍵名路徑。
 	///
 	/// **不碰任何值**：這個字串會被寫進 log，而 body 裡有 job token 與變數值。
@@ -234,6 +296,51 @@ public struct JobRequestClient: Sendable {
 		return Int(range[range.index(after: dash)...])
 	}
 
+	/// 產物上傳的查詢字串；鍵依字母序、空值整項省略，值逐字元百分比編碼。
+	///
+	/// 只放行 URL 的非保留字元、其餘一律編碼：`expire_in` 是 CI 檔原文（例如 `1 week`），
+	/// 而 `+` 在查詢字串裡會被站台讀成空白——只編碼一部分字元，`1+week` 這類值送過去就變了。
+	internal static func artifactQuery(of artifact: JobArtifact) -> String {
+		let pairs: [(String, String)] = [
+			("artifact_format", artifact.artifactFormat),
+			("artifact_type", artifact.artifactType),
+			("expire_in", artifact.expireIn)
+		]
+		return pairs
+			.filter { !$0.1.isEmpty }
+			.map { "\($0.0)=\(percentEncoded($0.1))" }
+			.joined(separator: "&")
+	}
+
+	/// 產物上傳的 `multipart/form-data` 本體：唯一一個欄位 `file`。
+	///
+	/// 檔名裡的反斜線與雙引號照 multipart 慣例跳脫；換行字元換成 `_`——檔名來自 payload，
+	/// 讓它帶著換行進到欄位標頭，等於讓 payload 決定請求本體多出哪幾行標頭。
+	internal static func multipartBody(file: Data, filename: String, boundary: String) -> Data {
+		// 逐 Unicode scalar 處理、不走字串替換：Swift 把 `\r\n` 當成一個字元，以字元為單位替換
+		// `\n` 時碰不到它，換行就原樣留在標頭裡。
+		var escaped: String = ""
+		for scalar in filename.unicodeScalars {
+			switch scalar {
+			case "\\":
+				escaped += "\\\\"
+			case "\"":
+				escaped += "\\\""
+			case "\r", "\n":
+				escaped += "_"
+			default:
+				escaped.unicodeScalars.append(scalar)
+			}
+		}
+		var body: Data = .init()
+		body.append(Data("--\(boundary)\r\n".utf8))
+		body.append(Data("Content-Disposition: form-data; name=\"file\"; filename=\"\(escaped)\"\r\n".utf8))
+		body.append(Data("Content-Type: application/octet-stream\r\n\r\n".utf8))
+		body.append(file)
+		body.append(Data("\r\n--\(boundary)--\r\n".utf8))
+		return body
+	}
+
 	/// 組出 `{host}/api/v4/{path}` 並送出；host 結尾多餘的斜線會先修剪。
 	private func send(
 		method: String,
@@ -255,6 +362,18 @@ public struct JobRequestClient: Sendable {
 			timeout: timeout
 		)
 		return try await transport.send(request)
+	}
+
+	/// 把字串百分比編碼成查詢字串的值；只留 RFC 3986 的非保留字元（ASCII 英數與 `-._~`）。
+	private static func percentEncoded(_ value: String) -> String {
+		var encoded: String = ""
+		for byte in value.utf8 {
+			let scalar: Unicode.Scalar = .init(byte)
+			let isUnreserved: Bool = ("A" ... "Z").contains(scalar) || ("a" ... "z").contains(scalar)
+				|| ("0" ... "9").contains(scalar) || "-._~".unicodeScalars.contains(scalar)
+			encoded += isUnreserved ? String(scalar) : String(format: "%%%02X", byte)
+		}
+		return encoded
 	}
 }
 
