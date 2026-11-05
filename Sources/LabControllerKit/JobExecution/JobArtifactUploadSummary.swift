@@ -36,7 +36,8 @@ public struct JobArtifactUploadSummary: Sendable, Equatable {
 				failureReason: report.failureReason,
 				exitCode: report.exitCode,
 				trace: trace,
-				warnings: report.warnings
+				warnings: report.warnings,
+				artifacts: report.artifacts
 			)
 		}
 		return .init(
@@ -44,7 +45,8 @@ public struct JobArtifactUploadSummary: Sendable, Equatable {
 			failureReason: .scriptFailure,
 			exitCode: nil,
 			trace: trace,
-			warnings: report.warnings
+			warnings: report.warnings,
+			artifacts: report.artifacts
 		)
 	}
 
