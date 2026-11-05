@@ -168,7 +168,7 @@ extension JobRunner {
 				trace.write("略過產物 \(filename)：它的上傳條件是 \(declaration.uploadCondition.rawValue)。")
 				continue
 			}
-			if let reason: String = Self.unsupportedReason(of: declaration) {
+			if let reason: String = declaration.collectionRefusal {
 				trace.write("產物 \(filename) 收不了：\(reason)。其餘產物不再收集。")
 				collection.hasFailed = true
 				return collection
@@ -297,28 +297,6 @@ extension JobRunner {
 		fi
 
 		"""
-	}
-
-	/// 本側收不了這一項宣告的原因；收得了時為 nil。
-	private static func unsupportedReason(of declaration: JobArtifact) -> String? {
-		guard ["", "archive"].contains(declaration.artifactType) else {
-			return "種類 \(declaration.artifactType) 不是 archive"
-		}
-		guard ["", "zip"].contains(declaration.artifactFormat) else {
-			return "打包格式 \(declaration.artifactFormat) 不是 zip"
-		}
-		guard !declaration.untracked else { return "要求連同未納入版本控制的檔案一起收" }
-		guard declaration.exclude.isEmpty else { return "宣告了排除路徑" }
-		for path in declaration.paths {
-			// 與 runner 端同：產物只能來自程式碼目錄底下。
-			guard !path.hasPrefix("/") else { return "路徑 \(path) 是絕對路徑" }
-			guard !path.split(separator: "/").contains("..") else { return "路徑 \(path) 含有 `..`" }
-			guard !path.contains("**") else { return "路徑 \(path) 含有 `**`，執行環境的 shell 展開不了" }
-			// runner 端會先展開路徑裡的 CI 變數；這裡照字面比對，展開之後才成立的路徑會變成「沒有符合」，
-			// job 照樣綠、產物卻少收。展開後的路徑也繞得過上面兩道檢查。
-			guard !path.contains("$") else { return "路徑 \(path) 含有變數，本側不展開" }
-		}
-		return nil
 	}
 
 	/// 打包腳本說的大小；`none` 為 0，讀不懂時為 nil。

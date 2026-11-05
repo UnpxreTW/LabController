@@ -11,11 +11,11 @@ import Logging
 
 /// 把「領一件、收不收、跑、回寫」串成一圈的迴圈。
 ///
-/// 這一層自己不決定任何事：收不收由 ``JobAdmission`` 判、怎麼跑由 ``JobRunner`` 做、回寫的
-/// 重試與續傳由 ``JobResultReporter`` 管。它只負責把四者接起來，並且守住兩件接起來才會出現
-/// 的事——**游標要一路帶著走**（連沒領到的那些輪次也要，否則站台端不 hold、long-poll 等於
-/// 沒開），以及**兩把 token 各走各的**：領件用 runner 認證 token，回寫用站台隨該件 job 發的
-/// 專屬 token，混用即為權限錯置。
+/// 這一層自己不決定任何事：收不收由 ``JobAdmission`` 判、怎麼跑由 ``JobRunner`` 做、產物怎麼送
+/// 由 ``JobArtifactUploader`` 管、回寫的重試與續傳由 ``JobResultReporter`` 管。它只負責把這幾者
+/// 接起來，並且守住兩件接起來才會出現的事——**游標要一路帶著走**（連沒領到的那些輪次也要，
+/// 否則站台端不 hold、long-poll 等於沒開），以及**兩把 token 各走各的**：領件用 runner 認證
+/// token，回寫用站台隨該件 job 發的專屬 token，混用即為權限錯置。
 ///
 /// 一次只經手一件 job：多開幾格是容量治理那一片的事，而那一片要先有逾時與殘骸回收才成立。
 public struct JobPollingLoop: Sendable {
@@ -120,6 +120,18 @@ public struct JobPollingLoop: Sendable {
 	/// 為真——取碼腳本已照站台指定的 refspec 抓（見 ``JobWorkspace``），其餘能力尚未實作。
 	public static let declaredFeatures: RunnerFeatures = .init(refspecs: true)
 
+	/// 沒給上傳器時用的那一支：上傳專用傳輸、整體時長取
+	/// ``URLSessionTransport/defaultArtifactUploadResourceTimeout``。
+	///
+	/// 做成共用的一份而不是每次建立迴圈各建一個：每建一次上傳專用傳輸就多一個不會釋放的 session。
+	public static let defaultUploader: JobArtifactUploader = .init(
+		client: .init(
+			transport: URLSessionTransport(
+				artifactUploadResourceTimeout: URLSessionTransport.defaultArtifactUploadResourceTimeout
+			)
+		)
+	)
+
 	/// 真的睡指定秒數；取消時直接回來，由呼叫端的停止旗標決定下一步。
 	///
 	/// **這一份叫不醒**：喊停翻的旗標要等睡滿才會被讀到。要讓喊停立刻結束等待，建立迴圈時把
@@ -153,6 +165,9 @@ public struct JobPollingLoop: Sendable {
 
 	/// 回寫用的回報器。
 	public let reporter: JobResultReporter
+
+	/// 送產物用的上傳器；只在 job 跑完、帶回了產物時才用到。
+	public let uploader: JobArtifactUploader
 
 	/// 這圈迴圈的設定。
 	public let configuration: Configuration
@@ -206,7 +221,16 @@ public struct JobPollingLoop: Sendable {
 				abortWhenCanceled: { await cancellation.untilStopped() },
 				logger: logger
 			)
-			let report: JobRunReport = await runner.run(plan, on: configuration.image)
+			let finished: JobRunReport = await runner.run(plan, on: configuration.image)
+			// 產物在回報收掉之前送：一份大的產物要送很久，這段期間站台端仍要看得到這件 job 還在跑，
+			// 而站台若在途中取消了它，也要靠回報那一支才看得到。
+			let report: JobRunReport = await Self.uploadingArtifacts(
+				of: finished,
+				with: uploader,
+				to: target,
+				masker: plan.masker,
+				canceled: cancellation.isStopped
+			)
 			keeping.cancel()
 			await keeping.value
 			let delivery: JobReportDelivery = try await deliver(report, to: target, of: job.id)
@@ -301,6 +325,8 @@ public struct JobPollingLoop: Sendable {
 	///   - client: 協議層 client。
 	///   - backend: 執行後端。
 	///   - reporter: 回寫用的回報器。
+	///   - uploader: 送產物用的上傳器；預設為 ``defaultUploader``。正式路徑給一支以
+	///     ``URLSessionTransport/init(artifactUploadResourceTimeout:)`` 建的，行程內只建一次。
 	///   - configuration: 迴圈設定。
 	///   - wait: 兩輪之間退避時等待的方式；預設真的睡指定秒數。
 	///   - resendWait: 回寫重送前等待的方式；預設真的睡指定秒數。
@@ -313,6 +339,7 @@ public struct JobPollingLoop: Sendable {
 		client: JobRequestClient = .init(),
 		backend: any ExecutionBackend,
 		reporter: JobResultReporter = .init(),
+		uploader: JobArtifactUploader = JobPollingLoop.defaultUploader,
 		configuration: Configuration,
 		wait: @escaping @Sendable (TimeInterval) async -> Void = JobPollingLoop.sleep,
 		resendWait: @escaping @Sendable (TimeInterval) async -> Void = JobPollingLoop.sleep,
@@ -325,12 +352,42 @@ public struct JobPollingLoop: Sendable {
 		self.client = client
 		self.backend = backend
 		self.reporter = reporter
+		self.uploader = uploader
 		self.configuration = configuration
 		self.wait = wait
 		self.resendWait = resendWait
 		self.requestScope = requestScope
 		self.abortRunningJob = abortRunningJob
 		self.keepaliveWait = keepaliveWait
+	}
+
+	// MARK: Internal
+
+	/// 跑完之後把帶回來的產物送上站台，再把結果併進這件 job 的結果。
+	///
+	/// 沒有產物時不呼叫上傳器、結果原樣交回。站台已經取消這件 job 時**不送**：job token 在那一刻已
+	/// 失效，送出去只會換回一串 403；只在 trace 留一行說明、終態不改——取消的這件 job 站台端已有
+	/// 定論。job 本身失敗時照送：會在那時帶回來的，本來就是條件為 `on_failure` 或 `always` 的產物。
+	///
+	/// - Parameters:
+	///   - report: 跑完的結果。
+	///   - uploader: 送產物用的上傳器。
+	///   - target: 回寫座標；上傳用的同樣是這件 job 的專屬 token。
+	///   - masker: trace 行的遮蔽規則。
+	///   - canceled: 站台是否已經取消這件 job。
+	/// - Returns: 併入上傳結果之後的結果。
+	internal static func uploadingArtifacts(
+		of report: JobRunReport,
+		with uploader: JobArtifactUploader,
+		to target: JobReportTarget,
+		masker: TraceMasker,
+		canceled: Bool
+	) async -> JobRunReport {
+		guard !report.artifacts.isEmpty else { return report }
+		guard !canceled else {
+			return JobArtifactUploadSummary(traceLines: ["站台已取消這件 job，產物不上傳。"]).applied(to: report)
+		}
+		return await uploader.upload(report.artifacts, to: target, masker: masker).applied(to: report)
 	}
 
 	// MARK: Private

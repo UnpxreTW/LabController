@@ -77,7 +77,8 @@ public enum JobAdmission: Sendable, Equatable {
 				fileVariables: job.variables.filter(\.file),
 				masker: masker,
 				timeoutSeconds: budget,
-				warnings: features.filter { $0.severity == .warning }
+				warnings: features.filter { $0.severity == .warning },
+				artifacts: job.artifacts
 			)
 		)
 	}
@@ -127,8 +128,19 @@ public enum JobAdmission: Sendable, Equatable {
 		if job.serviceCount > 0 {
 			features.append(.services(count: job.serviceCount))
 		}
-		if job.artifactCount > 0 {
-			features.append(.artifacts(count: job.artifactCount))
+		// 同 `steps[].when` 那一道：讀不懂的上傳條件回落成 `on_success`，照它收會在不該上傳的結果下
+		// 上傳、或該上傳時不上傳。
+		if !job.unreadableFields.contains("artifacts[].when"),
+		   job.artifacts.contains(where: { $0.unrecognisedUploadCondition != nil }) {
+			features.append(.unreadablePayloadField(name: "artifacts[].when"))
+		}
+		// 逐項判、逐項列：一個 `artifacts:` 區塊在站台端會拆成好幾項（`paths` 一項、每種 `reports`
+		// 各一項），只說「有收不了的」的話，讀 log 的人得回頭翻 CI 檔猜是哪一項。不看上傳條件——
+		// `when: on_failure` 的那一項在這件 job 失敗時一樣得收得了。
+		for artifact in job.artifacts {
+			if let reason: String = artifact.collectionRefusal {
+				features.append(.artifact(filename: artifact.uploadFilename, reason: reason))
+			}
 		}
 		// 判準是「這個上游真的存了產物」而不是「有沒有上游」——站台送的是全部上游。
 		// 名字讀不出來就退回識別碼：印成「上游 job（）」的話，讀 log 的人查不到是哪一個。

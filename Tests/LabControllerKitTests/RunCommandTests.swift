@@ -52,6 +52,22 @@ private final class RunCommandTests {
 		#expect(explicit.stopGrace == 5)
 	}
 
+	/// 上傳整體時長未給時取上傳專用傳輸的預設值（2 小時）、給了就原樣收下。
+	///
+	/// 預設值與傳輸那一側同一個數字：兩邊各寫一份的話，改了一邊、命令列的預設就與文件說的不同。
+	@Test
+	private func `run takes an artifact upload timeout with a default`() throws {
+		let fallback: RunCommand = try #require(
+			try LabControllerCommand.parseAsRoot(minimalArguments) as? RunCommand
+		)
+		#expect(fallback.artifactUploadTimeout == 7200)
+		#expect(fallback.artifactUploadTimeout == Int(URLSessionTransport.defaultArtifactUploadResourceTimeout))
+		let explicit: RunCommand = try #require(
+			try LabControllerCommand.parseAsRoot(minimalArguments + ["--artifact-upload-timeout", "900"]) as? RunCommand
+		)
+		#expect(explicit.artifactUploadTimeout == 900)
+	}
+
 	/// 資源旗標未給時回落 `NymphBackendConfiguration` 的預設值。
 	@Test
 	private func `run falls back to the backend defaults`() throws {
