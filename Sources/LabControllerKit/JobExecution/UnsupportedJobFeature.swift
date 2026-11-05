@@ -19,8 +19,8 @@ public enum UnsupportedJobFeature: Sendable, Equatable {
 	/// CI 檔宣告了 services。
 	case services(count: Int)
 
-	/// CI 檔宣告了要上傳的產物。
-	case artifacts(count: Int)
+	/// CI 檔宣告了一項本 runner 收不了的產物；一項一筆，附上檔名與原因。
+	case artifact(filename: String, reason: String)
 
 	/// 有上游 job 帶著要下載的產物。
 	case dependencyArtifacts(jobNames: [String])
@@ -57,7 +57,7 @@ public enum UnsupportedJobFeature: Sendable, Equatable {
 		switch self {
 		case .cache, .unmaskedShortValues:
 			return .warning
-		case .image, .services, .artifacts, .dependencyArtifacts, .unreadablePayloadField:
+		case .image, .services, .artifact, .dependencyArtifacts, .unreadablePayloadField:
 			return .fatal
 		}
 	}
@@ -74,8 +74,8 @@ public enum UnsupportedJobFeature: Sendable, Equatable {
 			return "executor 不支援 image：CI 檔指定了「\(shown)」，但本 runner 直接在既有環境執行、不拉 image。"
 		case let .services(count):
 			return "executor 不支援 services：CI 檔宣告了 \(count) 個 service。"
-		case let .artifacts(count):
-			return "executor 尚未實作產物上傳：CI 檔宣告了 \(count) 項 artifacts，照常跑完會變成「綠了但產物沒存」。"
+		case let .artifact(filename, reason):
+			return "executor 收不了產物 \(filename)：\(reason)。照常跑完會變成「綠了但產物沒存」，本 job 不執行。"
 		case let .dependencyArtifacts(jobNames):
 			let names: String = jobNames.joined(separator: "、")
 			return "executor 尚未實作產物下載：上游 job（\(names)）帶有本 job 依賴的產物。"
