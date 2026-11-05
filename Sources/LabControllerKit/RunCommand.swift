@@ -8,6 +8,7 @@
 
 import ArgumentParser
 import Foundation
+import Logging
 
 /// `run` 子命令的命令列引數；與根命令同一分層原則——本型別只負責解析與換算，
 /// 領件迴圈由 ``JobPollingLoop`` 跑、行程生命週期（訊號處理）留在可執行檔目標。
@@ -106,9 +107,29 @@ public struct RunCommand: ParsableCommand {
 	@Option(help: "Seconds a running job may keep going after a stop signal before its guest is aborted.")
 	public var stopGrace: Int = 30
 
+	/// 一份產物從送出到收完站台回應的上限，秒。
+	///
+	/// 上傳在 job 跑完之後才開始，**不算進這件 job 的時間上限**；這是另一道只管上傳的保險絲，
+	/// 防的是連線卡死，不是限制產物大小——一份產物送得多慢都可以，只要在這段時間內送完。每份
+	/// 產物各算各的，重送時重新起算。不大於 0 時取 ``URLSessionTransport/defaultArtifactUploadResourceTimeout``。
+	@Option(help: "Seconds one artifact upload may take from send to response; not counted in the job's time limit.")
+	public var artifactUploadTimeout: Int = .init(URLSessionTransport.defaultArtifactUploadResourceTimeout)
+
 	/// 紀錄門檻（`--log-level`；未給時看 `LOG_LEVEL`）。
 	@OptionGroup
 	public var logging: LoggingOptions
+
+	/// 由已解析的旗標值組出送產物用的上傳器；行程內只建一次，理由見
+	/// ``URLSessionTransport/init(artifactUploadResourceTimeout:)``。
+	///
+	/// - Parameter logger: 上傳器寫紀錄的出口。
+	/// - Returns: 走上傳專用傳輸的上傳器。
+	public func artifactUploader(logger: Logger) -> JobArtifactUploader {
+		.init(
+			client: .init(transport: URLSessionTransport(artifactUploadResourceTimeout: .init(artifactUploadTimeout))),
+			logger: logger
+		)
+	}
 
 	public init() {}
 
