@@ -81,12 +81,6 @@ private final class ScriptedPollTransport: HTTPTransport, Sendable {
 
 }
 
-/// 從請求本體解出 JSON 物件；解不出即測試失敗。
-private func requestBody(of request: HTTPRequest) throws -> [String: Any] {
-	let data: Data = try #require(request.body)
-	return try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
-}
-
 /// 站台指派一件 job 的回應；全為合成值。
 private let assignedJob: HTTPResponse = .init(
 	statusCode: 201,
@@ -106,13 +100,6 @@ private let containerJob: HTTPResponse = .init(
 		"""#.utf8)
 )
 
-/// 測試共用的迴圈設定；站台位址與 token 皆為合成值。
-private let configuration: JobPollingLoop.Configuration = .init(
-	host: "https://gitlab.example.invalid",
-	runnerToken: "synthetic-runner-token",
-	image: .alias("golden-xcode")
-)
-
 // MARK: - JobPollingLoopTests
 
 private final class JobPollingLoopTests {
@@ -125,7 +112,7 @@ private final class JobPollingLoopTests {
 			client: .init(transport: transport),
 			backend: InMemoryExecutionBackend(),
 			reporter: .init(client: .init(transport: transport), wait: { _ in }),
-			configuration: configuration
+			configuration: pollingLoopConfiguration
 		)
 		let cycle: JobCycle = try await loop.poll(cursor: nil)
 		#expect(cycle.disposition == .handled(jobIdentifier: 7, outcome: .completed, delivery: .init(
@@ -142,7 +129,7 @@ private final class JobPollingLoopTests {
 			client: .init(transport: transport),
 			backend: InMemoryExecutionBackend(),
 			reporter: .init(client: .init(transport: transport), wait: { _ in }),
-			configuration: configuration
+			configuration: pollingLoopConfiguration
 		)
 		_ = try await loop.poll(cursor: nil)
 		let requests: [HTTPRequest] = transport.requests.withLock { $0 }
@@ -169,7 +156,7 @@ private final class JobPollingLoopTests {
 			client: .init(transport: transport),
 			backend: InMemoryExecutionBackend(),
 			reporter: .init(client: .init(transport: transport), wait: { _ in }),
-			configuration: configuration
+			configuration: pollingLoopConfiguration
 		)
 		_ = try await loop.poll(cursor: nil)
 		let requests: [HTTPRequest] = transport.requests.withLock { $0 }
@@ -187,7 +174,7 @@ private final class JobPollingLoopTests {
 		let loop: JobPollingLoop = .init(
 			client: .init(transport: transport),
 			backend: InMemoryExecutionBackend(),
-			configuration: configuration
+			configuration: pollingLoopConfiguration
 		)
 		let cycle: JobCycle = try await loop.poll(cursor: "cursor-1")
 		#expect(cycle.disposition == .idle)
@@ -205,7 +192,7 @@ private final class JobPollingLoopTests {
 			client: .init(transport: transport),
 			backend: InMemoryExecutionBackend(),
 			reporter: .init(client: .init(transport: transport), wait: { _ in }),
-			configuration: configuration
+			configuration: pollingLoopConfiguration
 		)
 		let cycle: JobCycle = try await loop.poll(cursor: nil)
 		#expect(cycle.disposition == .refused(jobIdentifier: 9, delivery: .init(
@@ -230,7 +217,7 @@ private final class JobPollingLoopTests {
 			client: .init(transport: transport),
 			backend: backend,
 			reporter: .init(client: .init(transport: transport), wait: { _ in }),
-			configuration: configuration
+			configuration: pollingLoopConfiguration
 		)
 		_ = try await loop.poll(cursor: nil)
 		#expect(backend.destroyCount == 0)
@@ -245,7 +232,7 @@ private final class JobPollingLoopTests {
 			client: .init(transport: transport),
 			backend: InMemoryExecutionBackend(),
 			reporter: .init(client: .init(transport: transport), wait: { _ in }),
-			configuration: configuration
+			configuration: pollingLoopConfiguration
 		)
 		let lines: Mutex<[String]> = .init([])
 		await loop.run(stopAfterFirstJob: true, isStopped: { false }, logger: CapturingLogHandler.logger { _, line in
@@ -267,7 +254,7 @@ private final class JobPollingLoopTests {
 			client: .init(transport: transport),
 			backend: InMemoryExecutionBackend(),
 			reporter: .init(client: .init(transport: transport), wait: { _ in }),
-			configuration: configuration,
+			configuration: pollingLoopConfiguration,
 			wait: { seconds in waits.withLock { $0.append(seconds) } }
 		)
 		let lines: Mutex<[String]> = .init([])
@@ -290,7 +277,7 @@ private final class JobPollingLoopTests {
 			client: .init(transport: transport),
 			backend: InMemoryExecutionBackend(),
 			reporter: .init(client: .init(transport: transport), wait: { _ in }),
-			configuration: configuration,
+			configuration: pollingLoopConfiguration,
 			wait: { _ in }
 		)
 		let lines: Mutex<[String]> = .init([])
@@ -320,7 +307,7 @@ private final class JobPollingLoopTests {
 			client: .init(transport: transport),
 			backend: InMemoryExecutionBackend(),
 			reporter: .init(client: .init(transport: transport), wait: { _ in }),
-			configuration: configuration,
+			configuration: pollingLoopConfiguration,
 			wait: { seconds in waits.withLock { $0.append(seconds) } }
 		)
 		let lines: Mutex<[String]> = .init([])
@@ -343,7 +330,7 @@ private final class JobPollingLoopTests {
 			client: .init(transport: transport),
 			backend: InMemoryExecutionBackend(),
 			reporter: .init(client: .init(transport: transport), wait: { _ in }),
-			configuration: configuration,
+			configuration: pollingLoopConfiguration,
 			wait: { _ in },
 			resendWait: { _ in }
 		)
@@ -365,7 +352,7 @@ private final class JobPollingLoopTests {
 			client: .init(transport: transport),
 			backend: InMemoryExecutionBackend(),
 			reporter: .init(client: .init(transport: transport), wait: { _ in }),
-			configuration: configuration,
+			configuration: pollingLoopConfiguration,
 			wait: { _ in },
 			resendWait: { _ in }
 		)
@@ -391,7 +378,7 @@ private final class JobPollingLoopTests {
 			client: .init(transport: transport),
 			backend: InMemoryExecutionBackend(),
 			reporter: .init(client: .init(transport: transport), wait: { _ in }),
-			configuration: configuration,
+			configuration: pollingLoopConfiguration,
 			wait: { seconds in waits.withLock { $0.append(seconds) } },
 			resendWait: { seconds in resendWaits.withLock { $0.append(seconds) } }
 		)
@@ -412,7 +399,7 @@ private final class JobPollingLoopTests {
 			client: .init(transport: transport),
 			backend: InMemoryExecutionBackend(),
 			reporter: .init(client: .init(transport: transport), wait: { _ in }),
-			configuration: configuration,
+			configuration: pollingLoopConfiguration,
 			wait: { _ in },
 			resendWait: { _ in }
 		)
@@ -429,7 +416,7 @@ private final class JobPollingLoopTests {
 			client: .init(transport: transport),
 			backend: InMemoryExecutionBackend(),
 			reporter: .init(client: .init(transport: transport), wait: { _ in }),
-			configuration: configuration,
+			configuration: pollingLoopConfiguration,
 			wait: { _ in },
 			resendWait: { _ in }
 		)
@@ -450,7 +437,7 @@ private final class JobPollingLoopTests {
 			client: .init(transport: transport),
 			backend: InMemoryExecutionBackend(),
 			reporter: .init(client: .init(transport: transport), wait: { _ in }),
-			configuration: configuration,
+			configuration: pollingLoopConfiguration,
 			wait: { _ in },
 			resendWait: { _ in }
 		)
@@ -482,7 +469,7 @@ private final class JobPollingLoopStopTests {
 			client: .init(transport: transport),
 			backend: InMemoryExecutionBackend(),
 			reporter: .init(client: .init(transport: transport), wait: { _ in }),
-			configuration: configuration,
+			configuration: pollingLoopConfiguration,
 			wait: { seconds in await signal.wait(seconds) },
 			resendWait: { seconds in resendWaits.withLock { $0.append(seconds) } }
 		)
@@ -507,7 +494,7 @@ private final class JobPollingLoopStopTests {
 			client: .init(transport: transport),
 			backend: InMemoryExecutionBackend(),
 			reporter: .init(client: .init(transport: transport), wait: { _ in }),
-			configuration: configuration,
+			configuration: pollingLoopConfiguration,
 			wait: { seconds in await signal.wait(seconds) }
 		)
 		let startedAt: Date = .init()
@@ -541,7 +528,7 @@ private final class JobPollingLoopStopTests {
 			client: .init(transport: transport),
 			backend: InMemoryExecutionBackend(),
 			reporter: .init(client: .init(transport: transport), wait: { _ in }),
-			configuration: configuration,
+			configuration: pollingLoopConfiguration,
 			wait: { _ in },
 			requestScope: { request in
 				let result: JobRequestResult = try await request()
@@ -567,7 +554,7 @@ private final class JobPollingLoopStopTests {
 			client: .init(transport: transport),
 			backend: backend,
 			reporter: .init(client: .init(transport: transport), wait: { _ in }),
-			configuration: configuration,
+			configuration: pollingLoopConfiguration,
 			abortRunningJob: { await backend.untilFirstCommand() }
 		)
 		let cycle: JobCycle = try await loop.poll(cursor: nil)
@@ -597,7 +584,7 @@ private final class JobPollingLoopStopTests {
 			client: .init(transport: transport),
 			backend: backend,
 			reporter: .init(client: .init(transport: transport), wait: { _ in }),
-			configuration: configuration,
+			configuration: pollingLoopConfiguration,
 			// 第一次回報落在命令送進環境之後，後面幾輪不會再到——取消一到這一支就收手。
 			keepaliveWait: { _ in await backend.untilFirstCommand() }
 		)
@@ -632,7 +619,7 @@ private final class JobPollingLoopStopTests {
 		let loop: JobPollingLoop = .init(
 			client: .init(transport: transport),
 			backend: InMemoryExecutionBackend(),
-			configuration: configuration,
+			configuration: pollingLoopConfiguration,
 			wait: { seconds in waits.withLock { $0.append(seconds) } },
 			requestScope: { request in
 				// 站台此刻 hold 著連線，喊停正落在這中間：拋回來的形狀與真被取消時一樣。
@@ -659,7 +646,7 @@ private final class JobPollingLoopStopTests {
 		let loop: JobPollingLoop = .init(
 			client: .init(transport: transport),
 			backend: InMemoryExecutionBackend(),
-			configuration: configuration
+			configuration: pollingLoopConfiguration
 		)
 		await loop.run(stopAfterFirstJob: false, isStopped: { true }, logger: CapturingLogHandler.logger { _, _ in })
 		#expect(transport.requests.withLock { $0.isEmpty })
