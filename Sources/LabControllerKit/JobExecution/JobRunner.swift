@@ -28,12 +28,12 @@ import Logging
 /// 寬限用完把環境收掉。這幾件事在 trace 裡也有，但 trace 送不回站台的那一刻就一起消失，而
 /// 那正是最需要在機器上查得到的時候。
 ///
-/// **trace 上另有一張分段時間表**：檔案樹鋪好、環境開起來、取碼、每一個真的跑到的步驟、以及
-/// 收尾，各留一行 `[lab_controller] stage=<段名> t=<時刻> elapsed=<秒>s`。存在理由是一件 job
-/// 只回報一個終態時，跑了三十分鐘與跑了七十秒長得一模一樣——事後查不出那段時間落在哪裡。段名
-/// 不含空白、欄位以空白切開，是要讓這幾行事後被 `grep` 出來直接排成一張表；步驟因此走索引而
-/// 不是名字（名字由緊接著的 `$ ` 那一行給）。略過的步驟不留行：時間表上多一段沒發生過的事，
-/// 讀表的人會去找它。
+/// **trace 上另有一張分段時間表**：檔案樹鋪好、環境開起來、取碼、每一個真的跑到的步驟、收產物
+/// （有宣告時），以及收尾，各留一行 `[lab_controller] stage=<段名> t=<時刻> elapsed=<秒>s`。
+/// 存在理由是一件 job 只回報一個終態時，跑了三十分鐘與跑了七十秒長得一模一樣——事後查不出那段
+/// 時間落在哪裡。段名不含空白、欄位以空白切開，是要讓這幾行事後被 `grep` 出來直接排成一張表；
+/// 步驟因此走索引而不是名字（名字由緊接著的 `$ ` 那一行給）。略過的步驟不留行：時間表上多一段
+/// 沒發生過的事，讀表的人會去找它。
 ///
 /// - Important: 紀錄行一律不帶變數值、命令與命令輸出；錯誤一律經
 ///   ``GitLabAPIError/safeDescription(of:)`` 收斂，收斂後仍可能內插 payload 帶進來的字串
@@ -72,8 +72,10 @@ public struct JobRunner: Sendable {
 			trace.write(warning.traceMessage)
 		}
 		let workspace: JobWorkspace
+		let specification: GuestSpecification
 		do {
 			workspace = try .init(plan: plan, root: configuration.workspaceRoot)
+			specification = try .init(image: image, injectedFiles: Self.injectedFiles(for: plan, in: workspace))
 		} catch {
 			// 錯誤訊息內插的是變數名而不是值，但仍走遮蔽通道——「這條路徑上應該沒有秘密」
 			// 是一種會過期的推論，而過期的那一次就是秘密上站台的那一次。
@@ -92,7 +94,6 @@ public struct JobRunner: Sendable {
 		let startedAt: Date = now()
 		let deadline: Date = startedAt.addingTimeInterval(.init(plan.timeoutSeconds))
 		trace.mark("workspace", at: startedAt)
-		let specification: GuestSpecification = .init(image: image, injectedFiles: workspace.injectedFiles)
 		return await runInGuest(plan, in: workspace, as: specification, before: deadline, recording: trace)
 	}
 
@@ -128,6 +129,11 @@ public struct JobRunner: Sendable {
 		self.logger = logger
 		self.now = now
 	}
+
+	// MARK: Internal
+
+	/// 取當下時刻；測試靠它推時鐘，正式路徑取系統時間。
+	internal let now: @Sendable () -> Date
 
 	// MARK: Private
 
@@ -188,9 +194,6 @@ public struct JobRunner: Sendable {
 
 	/// 這一層的紀錄出口；寫的內容與界線見型別說明。
 	private let logger: Logger
-
-	/// 取當下時刻；測試靠它推時鐘，正式路徑取系統時間。
-	private let now: @Sendable () -> Date
 
 	/// 等容量的四種收法。
 	private enum CapacityWait {
@@ -318,7 +321,7 @@ public struct JobRunner: Sendable {
 			"""
 		)
 		return .init(outcome: report.outcome, failureReason: report.failureReason, exitCode: report.exitCode,
-		             trace: trace.finish(), warnings: report.warnings)
+		             trace: trace.finish(), warnings: report.warnings, artifacts: report.artifacts)
 	}
 
 	/// 等一輪，並把等待的來龍去脈寫進 trace；回報要不要再開一次環境。
@@ -601,8 +604,8 @@ public struct JobRunner: Sendable {
 			hasFailed = true
 			failure.record(result.exitCode)
 		}
-		guard hasFailed else { return report(plan, outcome: .completed, exitCode: 0, trace: trace) }
-		return report(plan, outcome: .jobFailed, reason: .scriptFailure, exitCode: failure.exitCode, trace: trace)
+		return try await finish(plan, in: workspace, on: guest, before: deadline, afterFailure: hasFailed,
+		                        failing: failure, recording: trace)
 	}
 
 	/// 收尾成一份結果；trace 在此刻收攏，之後不再寫入。
