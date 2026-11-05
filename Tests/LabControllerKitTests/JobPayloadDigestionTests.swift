@@ -481,15 +481,102 @@ private final class JobAdmissionTests {
 		#expect(rejection.traceMessage.contains("services"))
 	}
 
-	/// 宣告 artifacts 必須紅——回綠等於「綠了但產物沒存」。
+	/// 只宣告 `paths` 的 zip 產物收下，宣告原樣帶進執行計劃。
 	@Test
-	func `artifacts declaration is rejected`() {
-		let job: JobResponse = .init(id: 1, token: "t", artifacts: [.init(paths: ["a"]), .init(paths: ["b"])])
+	private func `paths artifacts are accepted and carried into the plan`() {
+		let declarations: [JobArtifact] = [
+			.init(name: "build", paths: ["build/*.app"], artifactType: "archive", artifactFormat: "zip"),
+			.init(name: "logs", paths: ["logs"], uploadCondition: .always)
+		]
+		let job: JobResponse = .init(id: 1, token: "t", artifacts: declarations)
+		guard case let .accepted(plan) = JobAdmission.review(job) else {
+			Issue.record("預期 accepted")
+			return
+		}
+		#expect(plan.artifacts == declarations)
+	}
+
+	/// 收不了的宣告一律紅、不跑任何步驟；訊息指名是哪一項、為什麼。
+	///
+	/// 判準與收集那一段是同一份：收件放行而收集才擋，等於把一件注定失敗的 job 跑完一整輪才紅。
+	@Test(
+		arguments: [
+			(JobArtifact(name: "out", paths: ["out"], exclude: ["out/tmp"]), "宣告了排除路徑"),
+			(JobArtifact(name: "out", untracked: true, paths: ["out"]), "未納入版本控制"),
+			(JobArtifact(name: "out", paths: ["out"], artifactType: "junit", artifactFormat: "gzip"), "種類 junit 不是 archive"),
+			(JobArtifact(name: "out", paths: ["out"], artifactFormat: "gzip"), "打包格式 gzip 不是 zip"),
+			(JobArtifact(name: "out", paths: ["/etc"]), "絕對路徑"),
+			(JobArtifact(name: "out", paths: ["../secret"]), "含有 `..`"),
+			(JobArtifact(name: "out", paths: ["out/**/*.log"]), "含有 `**`"),
+			(JobArtifact(name: "out", paths: ["build/$CI_JOB_NAME"]), "含有變數")
+		]
+	)
+	private func `artifacts it cannot collect are rejected with the reason`(_ declaration: JobArtifact, _ reason: String) {
+		let job: JobResponse = .init(id: 1, token: "t", artifacts: [declaration])
 		guard case let .rejected(rejection) = JobAdmission.review(job) else {
 			Issue.record("預期 rejected")
 			return
 		}
-		#expect(rejection.features == [.artifacts(count: 2)])
+		#expect(rejection.features.count == 1)
+		#expect(rejection.failureReason == .scriptFailure)
+		#expect(rejection.traceMessage.contains(declaration.uploadFilename))
+		#expect(rejection.traceMessage.contains(reason))
+	}
+
+	/// 一好一壞也紅，且只列壞的那一項；兩項都壞就兩項各一行。
+	@Test
+	private func `each refused artifact gets its own line`() {
+		let good: JobArtifact = .init(name: "build", paths: ["build"])
+		let mixed: JobResponse = .init(id: 1, token: "t", artifacts: [good, .init(name: "junit", artifactType: "junit")])
+		guard case let .rejected(rejection) = JobAdmission.review(mixed) else {
+			Issue.record("預期 rejected")
+			return
+		}
+		#expect(rejection.features == [.artifact(filename: "junit.zip", reason: "種類 junit 不是 archive")])
+		let both: JobResponse = .init(
+			id: 1,
+			token: "t",
+			artifacts: [.init(name: "a", paths: ["/a"]), .init(name: "b", paths: ["../b"])]
+		)
+		guard case let .rejected(twofold) = JobAdmission.review(both) else {
+			Issue.record("預期 rejected")
+			return
+		}
+		#expect(twofold.features.count == 2)
+		#expect(twofold.traceMessage.split(separator: "\n").count == 2)
+	}
+
+	/// 直接造出來的 payload 帶著讀不懂的上傳條件時也擋：解碼器記不到，擋門要建在做決定的這一關。
+	@Test
+	private func `unreadable artifact condition is rejected even without the decoder`() {
+		let job: JobResponse = .init(
+			id: 1,
+			token: "t",
+			artifacts: [.init(name: "out", paths: ["out"], unrecognisedUploadCondition: "sometimes")]
+		)
+		guard case let .rejected(rejection) = JobAdmission.review(job) else {
+			Issue.record("預期 rejected")
+			return
+		}
+		#expect(rejection.features == [.unreadablePayloadField(name: "artifacts[].when")])
+	}
+
+	/// 拒收訊息裡的路徑由 payload 而來，可能帶著變數展開後的值，照樣要過遮蔽。
+	@Test
+	private func `refused artifact paths are masked in the trace`() {
+		let secret: String = "synthetic-masked-value-0123"
+		let job: JobResponse = .init(
+			id: 1,
+			token: "t",
+			variables: [.init(key: "DEPLOY_PATH", value: secret, masked: true)],
+			artifacts: [.init(name: "out", paths: ["/\(secret)/out"])]
+		)
+		guard case let .rejected(rejection) = JobAdmission.review(job) else {
+			Issue.record("預期 rejected")
+			return
+		}
+		#expect(!rejection.traceMessage.contains(secret))
+		#expect(rejection.traceMessage.contains("絕對路徑"))
 	}
 
 	/// image 宣告拒收，訊息帶出是哪個 image。
@@ -575,7 +662,7 @@ private final class JobAdmissionTests {
 	/// 多項缺口一次全列出來，不是報第一個就停。
 	@Test
 	func `every blocking feature is reported`() {
-		let job: JobResponse = .init(id: 1, token: "t", imageName: "x", serviceCount: 1, artifacts: [.init()])
+		let job: JobResponse = .init(id: 1, token: "t", imageName: "x", serviceCount: 1, artifacts: [.init(paths: ["/out"])])
 		guard case let .rejected(rejection) = JobAdmission.review(job) else {
 			Issue.record("預期 rejected")
 			return
