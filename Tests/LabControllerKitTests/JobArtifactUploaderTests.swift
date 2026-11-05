@@ -64,13 +64,6 @@ private final class UploadTransport: HTTPTransport, Sendable {
 
 // MARK: - Fixtures
 
-/// 回寫座標；全為合成值。
-private let target: JobReportTarget = .init(
-	host: "https://gitlab.example.invalid",
-	identifier: 7,
-	token: "synthetic-job-token"
-)
-
 /// 一份合成產物。
 ///
 /// - Parameter name: 產物名稱。
@@ -114,7 +107,7 @@ private func run(
 			waits.withLock { $0.append(seconds) }
 		}
 	)
-	let summary: JobArtifactUploadSummary = await uploader.upload(artifacts, to: target, masker: masker)
+	let summary: JobArtifactUploadSummary = await uploader.upload(artifacts, to: syntheticReportTarget, masker: masker)
 	return .init(summary: summary, requests: transport.requests.withLock { $0 }, waits: waits.withLock { $0 })
 }
 
