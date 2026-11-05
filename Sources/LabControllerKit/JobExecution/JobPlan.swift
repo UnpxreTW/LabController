@@ -49,6 +49,11 @@ public struct JobPlan: Sendable, Equatable {
 	/// 每次都重新下載依賴」時無從查起。
 	public let warnings: [UnsupportedJobFeature]
 
+	/// 步驟跑完之後要收的產物宣告，依 payload 原順序。
+	///
+	/// 每一項依它的上傳條件與 job 是否已失敗決定收不收，收到的放進 ``JobRunReport/artifacts``。
+	public let artifacts: [JobArtifact]
+
 	/// 以顯式欄位建立。
 	public init(
 		jobIdentifier: Int,
@@ -58,7 +63,8 @@ public struct JobPlan: Sendable, Equatable {
 		fileVariables: [JobVariable] = [],
 		masker: TraceMasker = .init(maskedValues: []),
 		timeoutSeconds: Int,
-		warnings: [UnsupportedJobFeature] = []
+		warnings: [UnsupportedJobFeature] = [],
+		artifacts: [JobArtifact] = []
 	) {
 		self.jobIdentifier = jobIdentifier
 		self.git = git
@@ -68,6 +74,7 @@ public struct JobPlan: Sendable, Equatable {
 		self.masker = masker
 		self.timeoutSeconds = timeoutSeconds
 		self.warnings = warnings
+		self.artifacts = artifacts
 	}
 }
 
@@ -95,6 +102,7 @@ extension JobPlan: CustomStringConvertible, CustomDebugStringConvertible, Custom
 				"fileVariables": fileVariables.count,
 				"timeoutSeconds": timeoutSeconds,
 				"warnings": warnings.count,
+				"artifacts": artifacts.count
 			],
 			displayStyle: .struct
 		)

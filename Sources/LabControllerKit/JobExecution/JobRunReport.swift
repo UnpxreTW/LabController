@@ -13,7 +13,8 @@
 /// 與實際發生的事情會慢慢對不上。真正該拋的是「連要回報什麼都算不出來」，而這裡不存在那種
 /// 情況：環境開不起來就是 ``JobOutcome/systemFailed``。
 ///
-/// ⚠️ ``trace`` **已過遮蔽**，可以往站台送；其餘欄位不含 payload 衍生字串。
+/// - Important: ``trace`` **已過遮蔽**，可以往站台送；``artifacts`` 帶著 payload 給的宣告與 job
+///   自己產出的檔案內容，其餘欄位不含 payload 衍生字串。
 public struct JobRunReport: Sendable, Equatable {
 
 	/// 這次怎麼收的。
@@ -41,18 +42,26 @@ public struct JobRunReport: Sendable, Equatable {
 	/// 本次略過、但不影響結果正確性的能力宣告；原樣自 ``JobPlan/warnings`` 帶出。
 	public let warnings: [UnsupportedJobFeature]
 
+	/// 已在執行環境裡打包、取回本側的產物，依宣告順序。
+	///
+	/// 只收上傳條件成立的那幾項；一個檔案都沒有符合的不在這裡。收到一半就失敗時，失敗之前收成的
+	/// 那幾份仍在。
+	public let artifacts: [CollectedArtifact]
+
 	/// 逐欄建立。
 	public init(
 		outcome: JobOutcome,
 		failureReason: JobFailureReason? = nil,
 		exitCode: Int32? = nil,
 		trace: String = "",
-		warnings: [UnsupportedJobFeature] = []
+		warnings: [UnsupportedJobFeature] = [],
+		artifacts: [CollectedArtifact] = []
 	) {
 		self.outcome = outcome
 		self.failureReason = failureReason
 		self.exitCode = exitCode
 		self.trace = trace
 		self.warnings = warnings
+		self.artifacts = artifacts
 	}
 }
