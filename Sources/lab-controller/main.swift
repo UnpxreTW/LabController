@@ -168,6 +168,7 @@ if let run: RunCommand = parsedCommand as? RunCommand {
 	let stopGrace: TimeInterval = .init(run.stopGrace)
 	let loop: JobPollingLoop = .init(
 		backend: backend,
+		uploader: run.artifactUploader(logger: logger),
 		configuration: .init(host: run.host, runnerToken: runnerToken, image: run.image),
 		wait: { seconds in await stopSignal.wait(seconds) },
 		requestScope: { request in try await stopSignal.cancelWhenStopped(request) },
