@@ -30,8 +30,9 @@ public struct JobRequestClient: Sendable {
 
 	/// 產物上傳的逾時；整份檔案在同一個請求裡送出，不能沿用一般請求的短逾時。
 	///
-	/// - Warning: 這是每個請求的閒置上限，不是總時長上限：正式傳輸（`URLSessionTransport`）的
-	///   session 另有 600 秒的整體上限，一次上傳從送出到收完回應超過 600 秒就會被中斷，不論本值設多少。
+	/// - Warning: 這是每個請求的閒置上限，不是總時長上限。整體時長由傳輸層的 session 決定：共用的
+	///   正式傳輸（``URLSessionTransport/init()``）夾在 600 秒；送產物要用
+	///   ``URLSessionTransport/init(artifactUploadResourceTimeout:)`` 建的另一個 session，整體上限由它的參數另計。
 	public static let artifactUploadTimeout: TimeInterval = 600
 
 	/// 傳輸層；正式路徑用 `URLSessionTransport`、測試注入假傳輸。
