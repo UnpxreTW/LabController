@@ -314,6 +314,100 @@ private final class JobPayloadDecodingTests {
 		}
 		#expect(rejection.features == [.unreadablePayloadField(name: "steps[].when")])
 	}
+
+	/// 產物宣告逐欄解出來；上傳時要用到每一項的路徑、條件、格式與期限。
+	@Test
+	func `artifact declarations decode every field`() throws {
+		let job: JobResponse = try decodeJob(#"""
+			{"id":1,"token":"t","artifacts":[
+			  {"name":"build-output","untracked":false,"paths":["build/App.ipa","logs/*.txt"],
+			   "exclude":["logs/secret.txt"],"when":"always","artifact_type":"archive",
+			   "artifact_format":"zip","expire_in":"1 week"}
+			]}
+			"""#)
+		let artifact: JobArtifact = try #require(job.artifacts.first)
+		#expect(job.artifactCount == 1)
+		#expect(artifact.name == "build-output")
+		#expect(artifact.untracked == false)
+		#expect(artifact.paths == ["build/App.ipa", "logs/*.txt"])
+		#expect(artifact.exclude == ["logs/secret.txt"])
+		#expect(artifact.uploadCondition == .always)
+		#expect(artifact.unrecognisedUploadCondition == nil)
+		#expect(artifact.artifactType == "archive")
+		#expect(artifact.artifactFormat == "zip")
+		#expect(artifact.expireIn == "1 week")
+		#expect(job.unreadableFields.isEmpty)
+	}
+
+	/// 欄位缺席、null 與空字串的 `when` 都回落成上傳成功時才傳，且不留殘值。
+	@Test
+	func `artifact declaration defaults when fields are absent`() throws {
+		let job: JobResponse = try decodeJob(#"""
+			{"id":1,"token":"t","artifacts":[
+			  {},
+			  {"name":null,"paths":null,"when":""}
+			]}
+			"""#)
+		#expect(job.artifacts == [.init(), .init()])
+		for artifact in job.artifacts {
+			#expect(artifact.name.isEmpty)
+			#expect(!artifact.untracked)
+			#expect(artifact.paths.isEmpty)
+			#expect(artifact.exclude.isEmpty)
+			#expect(artifact.artifactType.isEmpty)
+			#expect(artifact.artifactFormat.isEmpty)
+			#expect(artifact.expireIn.isEmpty)
+		}
+		#expect(job.artifacts.allSatisfy { $0.uploadCondition == .onSuccess })
+		#expect(job.unreadableFields.isEmpty)
+	}
+
+	/// `on_failure` 對映得到；上傳條件與步驟條件同一套判斷。
+	@Test
+	func `artifact on failure condition maps to step condition`() throws {
+		let job: JobResponse = try decodeJob(#"""
+			{"id":1,"token":"t","artifacts":[{"paths":["out"],"when":"on_failure"}]}
+			"""#)
+		let artifact: JobArtifact = try #require(job.artifacts.first)
+		#expect(artifact.uploadCondition == .onFailure)
+		#expect(artifact.uploadCondition.shouldRun(afterFailure: true))
+		#expect(!artifact.uploadCondition.shouldRun(afterFailure: false))
+	}
+
+	/// 未知的產物 `when` 不得讓整包解不開，但必須記進讀不懂的欄位、原字串留著。
+	@Test
+	func `unknown artifact condition is recorded as unreadable`() throws {
+		let job: JobResponse = try decodeJob(#"""
+			{"id":1,"token":"t","artifacts":[{"paths":["out"],"when":"on_cancel"}]}
+			"""#)
+		#expect(job.artifacts.first?.unrecognisedUploadCondition == "on_cancel")
+		#expect(job.artifacts.first?.uploadCondition == .onSuccess)
+		#expect(job.unreadableFields == ["artifacts[].when"])
+	}
+
+	/// 產物宣告形狀不符時整個欄位記成讀不懂，其餘欄位照常解。
+	@Test
+	func `malformed artifact declaration is unreadable not fatal`() throws {
+		let job: JobResponse = try decodeJob(#"""
+			{"id":1,"token":"t","steps":[{"name":"script","script":["x"]}],
+			 "artifacts":[{"paths":"build/App.ipa"}]}
+			"""#)
+		#expect(job.artifacts.isEmpty)
+		#expect(job.unreadableFields == ["artifacts"])
+		#expect(job.steps.count == 1)
+	}
+
+	/// 上傳檔名取名稱最後一段加格式副檔名；名稱為空取 `default`。
+	@Test
+	func `artifact upload filename follows name and format`() {
+		#expect(JobArtifact().uploadFilename == "default.zip")
+		#expect(JobArtifact(name: ".").uploadFilename == "default.zip")
+		#expect(JobArtifact(name: "out/build-output").uploadFilename == "build-output.zip")
+		#expect(JobArtifact(name: "junit", artifactFormat: "gzip").uploadFilename == "junit.gz")
+		#expect(JobArtifact(name: "bundle", artifactFormat: "tarzstd").uploadFilename == "bundle.tar.zst")
+		#expect(JobArtifact(name: "bundle", artifactFormat: "zipzstd").uploadFilename == "bundle.zip")
+		#expect(JobArtifact(name: "report.json", artifactFormat: "raw").uploadFilename == "report.json")
+	}
 }
 
 /// 收件判定（`JobAdmission`）的行為。
@@ -390,7 +484,7 @@ private final class JobAdmissionTests {
 	/// 宣告 artifacts 必須紅——回綠等於「綠了但產物沒存」。
 	@Test
 	func `artifacts declaration is rejected`() {
-		let job: JobResponse = .init(id: 1, token: "t", artifactCount: 2)
+		let job: JobResponse = .init(id: 1, token: "t", artifacts: [.init(paths: ["a"]), .init(paths: ["b"])])
 		guard case let .rejected(rejection) = JobAdmission.review(job) else {
 			Issue.record("預期 rejected")
 			return
@@ -481,7 +575,7 @@ private final class JobAdmissionTests {
 	/// 多項缺口一次全列出來，不是報第一個就停。
 	@Test
 	func `every blocking feature is reported`() {
-		let job: JobResponse = .init(id: 1, token: "t", imageName: "x", serviceCount: 1, artifactCount: 1)
+		let job: JobResponse = .init(id: 1, token: "t", imageName: "x", serviceCount: 1, artifacts: [.init()])
 		guard case let .rejected(rejection) = JobAdmission.review(job) else {
 			Issue.record("預期 rejected")
 			return

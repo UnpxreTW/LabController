@@ -14,6 +14,8 @@
 /// **不消化 ≠ 可以不看**：`image`／`services`／`artifacts`／`cache`／`dependencies`
 /// 五個欄位雖然沒有對應實作，仍必須解出「有沒有宣告」——CI 檔要求了而 runner 默默不做，
 /// job 會綠得毫無破綻。判定收不收在 `JobAdmission`，本型別只負責把宣告如實帶出來。
+/// 其中 `artifacts` 逐項解成 ``JobArtifact``（上傳時要用到每一項的路徑、條件與格式），
+/// `services` 與 `cache` 仍只數筆數。
 ///
 /// **解碼的硬不變式：除了 `id` 與 `token`，沒有任何欄位可以害整包解不出來。** 整包解碼
 /// 失敗在呼叫端等同「這個 job 從未存在」——站台早已把它標成 running，卻永遠收不到任何
@@ -57,8 +59,8 @@ public struct JobResponse: Decodable, Sendable, Equatable,
 	/// CI 檔宣告的 service 數量。
 	public let serviceCount: Int
 
-	/// CI 檔宣告的產物上傳項目數量。
-	public let artifactCount: Int
+	/// CI 檔宣告的產物上傳項目，依 payload 原順序。
+	public let artifacts: [JobArtifact]
 
 	/// CI 檔宣告的快取項目數量。
 	public let cacheCount: Int
@@ -73,6 +75,11 @@ public struct JobResponse: Decodable, Sendable, Equatable,
 	/// 把它當成擋路的缺口，讓 job 明確紅在 trace 上、附上是哪個欄位讀不懂。
 	public let unreadableFields: [String]
 
+	/// CI 檔宣告的產物上傳項目數量。
+	public var artifactCount: Int {
+		artifacts.count
+	}
+
 	/// 以顯式欄位建立（測試用）。
 	public init(
 		id: Int,
@@ -83,7 +90,7 @@ public struct JobResponse: Decodable, Sendable, Equatable,
 		runnerInfo: JobRunnerInfo? = nil,
 		imageName: String? = nil,
 		serviceCount: Int = 0,
-		artifactCount: Int = 0,
+		artifacts: [JobArtifact] = [],
 		cacheCount: Int = 0,
 		dependencies: [JobDependency] = [],
 		unreadableFields: [String] = []
@@ -96,7 +103,7 @@ public struct JobResponse: Decodable, Sendable, Equatable,
 		self.runnerInfo = runnerInfo
 		self.imageName = imageName
 		self.serviceCount = serviceCount
-		self.artifactCount = artifactCount
+		self.artifacts = artifacts
 		self.cacheCount = cacheCount
 		self.dependencies = dependencies
 		self.unreadableFields = unreadableFields
@@ -122,7 +129,7 @@ public struct JobResponse: Decodable, Sendable, Equatable,
 				"variables": variables.count,
 				"imageName": imageName ?? "nil",
 				"serviceCount": serviceCount,
-				"artifactCount": artifactCount,
+				"artifacts": artifacts.count,
 				"cacheCount": cacheCount,
 				"dependencies": dependencies.count,
 				"unreadableFields": unreadableFields,
@@ -144,7 +151,7 @@ public struct JobResponse: Decodable, Sendable, Equatable,
 		self.runnerInfo = Self.optional(JobRunnerInfo.self, in: container, forKey: .runnerInfo, into: &unreadable)
 		self.imageName = Self.imageName(in: container, into: &unreadable)
 		self.serviceCount = Self.count(in: container, forKey: .services, into: &unreadable)
-		self.artifactCount = Self.count(in: container, forKey: .artifacts, into: &unreadable)
+		self.artifacts = Self.optional([JobArtifact].self, in: container, forKey: .artifacts, into: &unreadable) ?? []
 		self.cacheCount = Self.count(in: container, forKey: .cache, into: &unreadable)
 		self.dependencies = Self.optional(
 			[JobDependency].self,
@@ -156,6 +163,10 @@ public struct JobResponse: Decodable, Sendable, Equatable,
 		// 漂移同級，因此走同一條通道擋下。一個 job 只記一次，別讓 100 個步驟刷出 100 行。
 		if self.steps.contains(where: { $0.unrecognisedRunCondition != nil }) {
 			unreadable.append("steps[].when")
+		}
+		// 產物的 `when` 同理：回落成 on_success 等於在不該上傳的結果下上傳。
+		if self.artifacts.contains(where: { $0.unrecognisedUploadCondition != nil }) {
+			unreadable.append("artifacts[].when")
 		}
 		// 站台說某個上游有產物、我們卻讀不出檔名：形狀跟預期不一樣，不可以就這樣算了。
 		if self.dependencies.contains(where: \.hasUnreadableArtifactsFilename) {
