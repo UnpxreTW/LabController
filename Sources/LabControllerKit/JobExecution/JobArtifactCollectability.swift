@@ -13,14 +13,23 @@
 /// 放行了另一邊會擋下的宣告——收件放行、收集才擋，等於把一件注定失敗的 job 跑完一整輪才紅。
 extension JobArtifact {
 
+	/// 這一項宣告在執行環境裡打成哪一種檔；種類不在 ``JobArtifactPacking/formats`` 裡時為 nil。
+	///
+	/// 種類未宣告時當成 `archive`，與站台送 `paths` 那一項的寫法相同。
+	internal var packing: JobArtifactPacking? {
+		JobArtifactPacking.formats[artifactType.isEmpty ? "archive" : artifactType]
+	}
+
 	/// 本側收不了這一項宣告的原因；收得了時為 nil。
 	///
-	/// 只收 `paths`：`untracked`、`exclude`、`reports` 類與 zip 以外的格式都不收——照常跑完而少收
-	/// 或多收檔案，站台端看到的會是一份內容不對的產物。上傳條件讀不懂不在這裡判：那是協議形狀的
-	/// 問題，由 ``JobResponse/unreadableFields`` 記成讀不懂的欄位。
+	/// 只收 ``JobArtifactPacking/formats`` 裡的種類、且格式要與該種類相符；`untracked`、`exclude`
+	/// 都不收——照常跑完而少收或多收檔案，站台端看到的會是一份內容不對的產物。上傳條件讀不懂不在
+	/// 這裡判：那是協議形狀的問題，由 ``JobResponse/unreadableFields`` 記成讀不懂的欄位。
 	internal var collectionRefusal: String? {
-		guard ["", "archive"].contains(artifactType) else { return "種類 \(artifactType) 不是 archive" }
-		guard ["", "zip"].contains(artifactFormat) else { return "打包格式 \(artifactFormat) 不是 zip" }
+		guard let packing: JobArtifactPacking = self.packing else { return "種類 \(artifactType) 本側不收" }
+		// 格式未宣告時當成 zip，與 runner 端同。
+		let format: String = artifactFormat.isEmpty ? JobArtifactPacking.zip.rawValue : artifactFormat
+		guard format == packing.rawValue else { return "打包格式 \(format) 不是 \(packing.rawValue)" }
 		guard !untracked else { return "要求連同未納入版本控制的檔案一起收" }
 		guard exclude.isEmpty else { return "宣告了排除路徑" }
 		for path in paths {

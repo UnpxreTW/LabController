@@ -148,9 +148,10 @@ private final class JobPollingLoopTests {
 		#expect(!leaked)
 	}
 
-	/// 領件時要把 refspec 能力宣告出去：不宣告，合併請求那類 pipeline 的 job 一領走就被判死。
+	/// 領件時要把 refspec 與多份產物兩項能力宣告出去：不宣告，合併請求那類 pipeline 的 job、
+	/// 寫了 `reports` 的 job 一領走就被判死。
 	@Test
-	private func `declares the refspec capability when asking for work`() async throws {
+	private func `declares the refspec and multiple artifact capabilities when asking for work`() async throws {
 		let transport: ScriptedPollTransport = .init([.respond(.init(statusCode: 204))])
 		let loop: JobPollingLoop = .init(
 			client: .init(transport: transport),
@@ -163,6 +164,7 @@ private final class JobPollingLoopTests {
 		let info: [String: Any] = try #require(try requestBody(of: requests[0])["info"] as? [String: Any])
 		let features: [String: Any] = try #require(info["features"] as? [String: Any])
 		#expect(features["refspecs"] as? Bool == true)
+		#expect(features["upload_multiple_artifacts"] as? Bool == true)
 	}
 
 	/// 沒領到也要把游標帶回來——long-poll 的 hold 就是靠它，漏帶等於每一輪都白等。

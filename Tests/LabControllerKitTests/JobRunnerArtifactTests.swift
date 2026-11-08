@@ -85,8 +85,8 @@ private final class JobRunnerArtifactTests {
 		#expect(report.exitCode == 0)
 		#expect(report.artifacts == [.init(declaration: declaration, archive: archive)])
 		#expect(backend.executedCommands.filter(isReading).map { Array($0.suffix(2)) } == [
-			["/tmp/labcontroller/artifacts/0.zip", "0"],
-			["/tmp/labcontroller/artifacts/0.zip", "1"]
+			["/tmp/labcontroller/artifacts/0.packed", "0"],
+			["/tmp/labcontroller/artifacts/0.packed", "1"]
 		])
 		#expect(report.trace.contains("stage=artifacts"))
 	}

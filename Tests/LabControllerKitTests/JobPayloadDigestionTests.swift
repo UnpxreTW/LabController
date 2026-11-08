@@ -496,6 +496,35 @@ private final class JobAdmissionTests {
 		#expect(plan.artifacts == declarations)
 	}
 
+	/// `reports` 類的 `junit`（gzip）與 `codequality`（raw）收下，與 `paths` 那一項一起帶進執行計劃；
+	/// 宣告的寫法照站台送的那一份。
+	@Test
+	private func `junit and codequality reports are accepted alongside paths`() {
+		let declarations: [JobArtifact] = [
+			.init(name: "build", paths: ["build"], artifactType: "archive", artifactFormat: "zip"),
+			.init(
+				name: "junit.xml",
+				paths: ["report.xml"],
+				uploadCondition: .always,
+				artifactType: "junit",
+				artifactFormat: "gzip"
+			),
+			.init(
+				name: "gl-code-quality-report.json",
+				paths: ["quality.json"],
+				uploadCondition: .always,
+				artifactType: "codequality",
+				artifactFormat: "raw"
+			)
+		]
+		let job: JobResponse = .init(id: 1, token: "t", artifacts: declarations)
+		guard case let .accepted(plan) = JobAdmission.review(job) else {
+			Issue.record("預期 accepted")
+			return
+		}
+		#expect(plan.artifacts == declarations)
+	}
+
 	/// 收不了的宣告一律紅、不跑任何步驟；訊息指名是哪一項、為什麼。
 	///
 	/// 判準與收集那一段是同一份：收件放行而收集才擋，等於把一件注定失敗的 job 跑完一整輪才紅。
@@ -503,7 +532,9 @@ private final class JobAdmissionTests {
 		arguments: [
 			(JobArtifact(name: "out", paths: ["out"], exclude: ["out/tmp"]), "宣告了排除路徑"),
 			(JobArtifact(name: "out", untracked: true, paths: ["out"]), "未納入版本控制"),
-			(JobArtifact(name: "out", paths: ["out"], artifactType: "junit", artifactFormat: "gzip"), "種類 junit 不是 archive"),
+			(JobArtifact(name: "out", paths: ["out"], artifactType: "sast", artifactFormat: "raw"), "種類 sast 本側不收"),
+			(JobArtifact(name: "out", paths: ["out"], artifactType: "junit", artifactFormat: "zip"), "打包格式 zip 不是 gzip"),
+			(JobArtifact(name: "out", paths: ["out"], artifactType: "codequality", artifactFormat: "gzip"), "打包格式 gzip 不是 raw"),
 			(JobArtifact(name: "out", paths: ["out"], artifactFormat: "gzip"), "打包格式 gzip 不是 zip"),
 			(JobArtifact(name: "out", paths: ["/etc"]), "絕對路徑"),
 			(JobArtifact(name: "out", paths: ["../secret"]), "含有 `..`"),
@@ -527,12 +558,12 @@ private final class JobAdmissionTests {
 	@Test
 	private func `each refused artifact gets its own line`() {
 		let good: JobArtifact = .init(name: "build", paths: ["build"])
-		let mixed: JobResponse = .init(id: 1, token: "t", artifacts: [good, .init(name: "junit", artifactType: "junit")])
+		let mixed: JobResponse = .init(id: 1, token: "t", artifacts: [good, .init(name: "sast", artifactType: "sast")])
 		guard case let .rejected(rejection) = JobAdmission.review(mixed) else {
 			Issue.record("預期 rejected")
 			return
 		}
-		#expect(rejection.features == [.artifact(filename: "junit.zip", reason: "種類 junit 不是 archive")])
+		#expect(rejection.features == [.artifact(filename: "sast.zip", reason: "種類 sast 本側不收")])
 		let both: JobResponse = .init(
 			id: 1,
 			token: "t",
