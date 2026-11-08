@@ -116,9 +116,16 @@ public struct JobPollingLoop: Sendable {
 	/// 領件時向站台宣告的能力。
 	///
 	/// **只宣告這一層真的做得到的**：站台在指派前照這份自述篩，宣告不足會讓需要該能力的 job
-	/// 被判死（見 ``RunnerFeatures``），宣告過頭則換成領到之後才失敗。目前只有 `refspecs`
-	/// 為真——取碼腳本已照站台指定的 refspec 抓（見 ``JobWorkspace``），其餘能力尚未實作。
-	public static let declaredFeatures: RunnerFeatures = .init(refspecs: true)
+	/// 被判死（見 ``RunnerFeatures``），宣告過頭則換成領到之後才失敗。目前為真的兩項：
+	///
+	/// - `refspecs`：取碼腳本已照站台指定的 refspec 抓（見 ``JobWorkspace``）。
+	/// - `upload_multiple_artifacts`：`reports` 類的 `junit`、`codequality` 收得了（見
+	///   ``JobArtifactPacking``）。這一項在站台端不分種類，宣告之後任何 `reports` 類的 job 都會派
+	///   過來；其餘種類在收件時拒收，訊息指名是哪一項。不宣告的話，只寫了 `junit` 的 job 也會在
+	///   站台端直接判死。
+	///
+	/// 其餘能力尚未實作。
+	public static let declaredFeatures: RunnerFeatures = .init(refspecs: true, uploadMultipleArtifacts: true)
 
 	/// 沒給上傳器時用的那一支：上傳專用傳輸、整體時長取
 	/// ``URLSessionTransport/defaultArtifactUploadResourceTimeout``。
