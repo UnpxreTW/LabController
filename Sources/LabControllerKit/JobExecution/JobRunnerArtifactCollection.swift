@@ -22,8 +22,9 @@ import Foundation
 /// 腳本取索引不取名字的理由相同。宣告裡的路徑以單引號字面寫進腳本，在執行環境裡只做路徑展開
 /// （不經 `eval`、不做命令替換），展開的起點是取回的程式碼目錄。
 ///
-/// - Important: 只收 `paths`：`untracked`、`exclude`、`reports` 類與 zip 以外的格式都不在這裡
-///   處理，遇到就算收集失敗——照常跑完而少收或多收檔案，站台端看到的會是一份內容不對的產物。
+/// - Important: 只收 ``JobArtifactPacking/formats`` 裡的種類：`untracked`、`exclude`、其餘
+///   `reports` 類與格式對不上的宣告都不在這裡處理，遇到就算收集失敗——照常跑完而少收或多收檔案，
+///   站台端看到的會是一份內容不對的產物。
 extension JobRunner {
 
 	// MARK: Public
@@ -66,8 +67,10 @@ extension JobRunner {
 		guard !plan.artifacts.isEmpty else { return workspace.injectedFiles }
 		var files: [InjectedFile] = workspace.injectedFiles
 		for (index, declaration) in plan.artifacts.enumerated() {
+			// 收不了的宣告在收集時就擋下、這份腳本不會被執行，故格式取不到時寫哪一種都無妨。
 			let script: String = packingScript(
 				patterns: declaration.paths,
+				packing: declaration.packing ?? .zip,
 				from: workspace.checkoutDirectory,
 				into: archivePath(at: index, in: workspace)
 			)
@@ -255,12 +258,17 @@ extension JobRunner {
 		"""
 	}
 
-	/// 一項宣告的打包腳本：在程式碼目錄裡展開每一條路徑、打成 zip，印出大小或 `none`。
+	/// 一項宣告的打包腳本：在程式碼目錄裡展開每一條路徑、依格式打包，印出大小或 `none`。
 	///
 	/// `IFS` 清空之後，未加引號的 `$pattern` 只做路徑展開、不再斷詞；`nullglob` 讓沒有符合的
 	/// pattern 展開成空，而不是原樣留下一個不存在的名字。不用 `**`：執行環境的 bash 可能是 3.2，
 	/// 沒有 `globstar`。
-	private static func packingScript(patterns: [String], from directory: String, into archive: String) -> String {
+	private static func packingScript(
+		patterns: [String],
+		packing: JobArtifactPacking,
+		from directory: String,
+		into archive: String
+	) -> String {
 		"""
 		# 由 LabController 產生；隨執行環境焚毀。
 		set -e
@@ -271,8 +279,8 @@ extension JobRunner {
 		archive=\(singleQuoted(archive))
 		patterns=(\(patterns.map(singleQuoted).joined(separator: " ")))
 		rm -f "$archive"
-		if ! command -v zip >/dev/null 2>&1; then
-			echo "執行環境裡沒有 zip，產物無法打包。" >&2
+		if ! command -v \(packing.tool) >/dev/null 2>&1; then
+			echo "執行環境裡沒有 \(packing.tool)，產物無法打包。" >&2
 			exit 1
 		fi
 		files=()
@@ -281,8 +289,9 @@ extension JobRunner {
 			matched=0
 			for file in $pattern; do
 				if [ -e "$file" ] || [ -L "$file" ]; then
-					files+=("$file")
 					matched=1
+					for kept in "${files[@]}"; do [ "$kept" = "$file" ] && continue 2; done
+					files+=("$file")
 				fi
 			done
 			if [ "$matched" -eq 0 ]; then
@@ -292,7 +301,7 @@ extension JobRunner {
 		if [ "${#files[@]}" -eq 0 ]; then
 			echo "\(packedMarker)none"
 		else
-			zip -q -r -y "$archive" -- "${files[@]}"
+			\(packing.command)
 			echo "\(packedMarker)$(wc -c < "$archive" | tr -d ' ')"
 		fi
 
@@ -322,9 +331,9 @@ extension JobRunner {
 		"\(workspace.root)/artifacts/pack-\(index).sh"
 	}
 
-	/// 第 `index` 項宣告的打包檔路徑；落在程式碼目錄之外，免得把自己也收進去。
+	/// 第 `index` 項宣告的打包檔路徑；落在程式碼目錄之外，免得把自己也收進去。三種格式共用這個名字。
 	private static func archivePath(at index: Int, in workspace: JobWorkspace) -> String {
-		"\(workspace.root)/artifacts/\(index).zip"
+		"\(workspace.root)/artifacts/\(index).packed"
 	}
 
 	/// 分塊讀取腳本的路徑。
